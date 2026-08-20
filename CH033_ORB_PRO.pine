@@ -1,0 +1,1430 @@
+//@version=6
+// =====================================================================================================================
+//  CH033 ORB+ VWAPs Indicator  ·  VWAPs automáticos + motor de señales "Manipulación del rango + Cruce VWAP"
+//  Indicador personal de Christian. Basado en la estructura de VWAPs automáticos de ASFX, reescrito y ampliado.
+//
+//  SETUP (fade de la manipulación):
+//    1) Se forma la primera vela de 15m de la sesión de NY (09:30-09:45) -> línea en su máximo y en su mínimo.
+//    2) El precio ROMPE uno de los lados  -> 1ª CONDICIÓN. Vale mecha o cierre. Se MARCA esa vela. NO hay entrada.
+//    3) El precio REGRESA dentro del rango -> se confirma la manipulación.
+//    4) Una vela CIERRA cruzando el VWAP de sesión de NY en sentido CONTRARIO a la ruptura -> ENTRADA.
+//       Aquí NO vale mecha: tiene que ser cierre. Se MARCA esa vela con su propio color.
+//         · Rompe arriba  -> vuelve al rango -> cierra por DEBAJO del VWAP  =>  CORTO
+//         · Rompe abajo   -> vuelve al rango -> cierra por ENCIMA del VWAP  =>  LARGO
+//
+//  CONTEXTO (v1.2):
+//    · Máximo y mínimo de ASIA y LONDRES en línea horizontal. La línea deja de extenderse cuando el precio barre
+//      ese nivel, así se distingue de un vistazo la liquidez ya tomada de la que sigue viva.
+//    · FVG (huecos de valor justo) de M15 y H1 en recuadro gris con la temporalidad escrita dentro. El recuadro
+//      arranca en la vela del medio del patrón y se congela al primer toque, con mecha o con cuerpo.
+//    · Ambos bloques se encienden y se apagan desde los ajustes, y cada opción es configurable.
+//
+//  PANELES: Tendencia (H1/M15/VWAP) y Setup (ruptura · estado · resultado · rango). Ambos con MNQ, MES y MYM a la vez.
+//    · Columna RESULT (v1.3): qué pasó con la señal del día en cada activo, sin tener que cambiar de gráfico.
+//        ✔ = llegó a TP1 (1:1)   ✔✔ = llegó a TP2   ✔✔✔ = llegó a TP3   ✕ roja = stop antes del 1:1
+//        … azul = operación viva      = gris = cerrada sin TP1 ni stop      / = todavía sin entrada
+//      Tras TP1 el stop pasa a break-even, así que una salida en BE conserva los chulos ya ganados.
+//
+//  PERFIL DE VOLUMEN (v2.0): heatmap del volumen ya ejecutado repartido por niveles de precio, con POC,
+//    nodos de alto volumen (HVN, donde el precio se atasca) y de bajo volumen (LVN, por donde pasa rápido).
+//    NO es un heatmap de órdenes tipo Bookmap: el libro de órdenes no llega a Pine, así que no hay forma
+//    de ver órdenes en reposo ni spoofing desde un indicador. Esto son operaciones ya cerradas.
+// =====================================================================================================================
+indicator('CH033 ORB+ PRO', 'CH033 PRO', true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500, max_bars_back = 5000)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings (original)
+//---------------------------------------------------------------------------------------------------------------------{
+display = display.all - display.status_line
+vwapSource = input.source(ohlc4, 'Fuente del VWAP', display = display)
+groupVwap = '📈 VWAPs de la sesión de Nueva York'
+vwapShow = input.bool(true, 'VWAP de la sesión de NY (desde 09:30)', inline = 'NYC', group = groupVwap)
+vwapColor = input.color(#0031ff, '', inline = 'NYC', group = groupVwap)
+vwapStyle = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYC', group = groupVwap, display = display)
+vwapHistory = input.int(0, "  VWAPs históricos", minval = 0, group = groupVwap, display = display)
+vwapShowP = input.bool(true, 'VWAP de la apertura de NY del día anterior', inline = 'NYP', group = groupVwap)
+vwapSourceP = vwapSource
+vwapColorP = input.color(color.new(#4dd0e1, 60), '', inline = 'NYP', group = groupVwap)
+vwapStyleP = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYP', group = groupVwap, display = display)
+groupVwapD = '📈 VWAPs del día'
+vwapShowD = input.bool(true, 'VWAP desde el inicio del día', inline = 'B1S', group = groupVwapD)
+vwapSourceD = vwapSource
+vwapColorD = input.color(#000000, '', inline = 'B1S', group = groupVwapD)
+vwapStyleD = input.string('Dotted', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'B1S', group = groupVwapD, display = display)
+vwapBand1D  = input.bool(false,"Bandas", inline = 'BS', group = groupVwapD)
+vwapMult1D = input.float(1, "", step = .1, inline = 'BS', group = groupVwapD, display = display)
+vwapBand1CD = input.color(#000000, '', inline = 'BS', group = groupVwapD)
+vwapBand1SD = input.string('Dotted', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'BS', group = groupVwapD, display = display)
+vwapHistoryD = input.int(0, "  VWAPs históricos", minval = 0, group = groupVwapD, display = display)
+vwapShowDH = input.bool(false, 'VWAP desde el máximo del día', inline = 'B1H', group = groupVwapD)
+vwapSourceDH = vwapSource
+vwapColorDH = input.color(#673ab7, '', inline = 'B1H', group = groupVwapD)
+vwapStyleDH = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'B1H', group = groupVwapD, display = display)
+vwapBand1DH  = input.bool(false,"Bandas", inline = 'BH', group = groupVwapD)
+vwapMult1DH = input.float(1, "", step = .1, inline = 'BH', group = groupVwapD, display = display)
+vwapBand1CDH = input.color(#80008080, '', inline = 'BH', group = groupVwapD)
+vwapBand1SDH = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'BH', group = groupVwapD, display = display)
+vwapShowDL = input.bool(false, 'VWAP desde el mínimo del día', inline = 'B1L', group = groupVwapD)
+vwapSourceDL = vwapSource
+vwapColorDL = input.color(#673ab7, '', inline = 'B1L', group = groupVwapD)
+vwapStyleDL = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'B1L', group = groupVwapD, display = display)
+vwapBand1DL  = input.bool(false,"Bandas", inline = 'BL', group = groupVwapD)
+vwapMult1DL = input.float(1, "", step = .1, inline = 'BL', group = groupVwapD, display = display)
+vwapBand1CDL = input.color(#800080, '', inline = 'BL', group = groupVwapD)
+vwapBand1SDL = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'BL', group = groupVwapD, display = display)
+groupVwapM = '📈 VWAPs de temporalidad mayor'
+vwapShowM = input.bool(false, 'VWAP desde el inicio del mes', inline = 'NYC', group = groupVwapM)
+vwapSourceM = vwapSource
+vwapColorM = input.color(#000000, '', inline = 'NYC', group = groupVwapM)
+vwapStyleM = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYC', group = groupVwapM, display = display)
+vwapHistoryM = input.int(0, "  VWAPs históricos", minval = 0, group = groupVwapM, display = display)
+vwapShowY = input.bool(false, 'VWAP desde el inicio del año', inline = 'NYCy', group = groupVwapM)
+vwapSourceY = vwapSource
+vwapColorY = input.color(#c8e6c9, '', inline = 'NYCy', group = groupVwapM)
+vwapStyleY = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYCy', group = groupVwapM, display = display)
+vwapHistoryY = input.int(0, "  VWAPs históricos", minval = 0, group = groupVwapM, display = display)
+vwapShowH = input.bool(false, 'VWAP desde el máximo del año', inline = 'NYCh', group = groupVwapM)
+vwapSourceH = vwapSource
+vwapColorH = input.color(#4caf50, '', inline = 'NYCh', group = groupVwapM)
+vwapStyleH = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYCh', group = groupVwapM, display = display)
+group_orbr = '🟦 Rango de apertura de Nueva York'
+nyShow = input(true, 'Dibujar el rango de apertura', group = group_orbr)
+nyRange = input.session('0930-0945', '  Horario del rango', inline = 'NY', group = group_orbr, display = display)
+nyColor = input.color(#000000, '  Color', inline = 'NYC', group = group_orbr)
+nyLineS = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'NYC', group = group_orbr, display = display)
+nyTrans = input.int(100, 'Opacidad', minval = 0, maxval = 100, inline = 'NYC', group = group_orbr, display = display)
+nyHistory = input.int(0, "  Rangos de apertura históricos", minval = 0, group = group_orbr, display = display)
+orbDrawSes = input.session('0930-1600', '  Extender las líneas hasta', group = group_orbr, display = display, tooltip = 'Fuera de este horario las líneas del rango dejan de crecer y se quedan clavadas donde estaban. Por defecto llegan hasta el cierre de la sesión de Nueva York y ahí se paran, en vez de seguir toda la noche y meterse en la premarket del día siguiente.\n\nEl rango del día anterior desaparece solo cuando se forma el nuevo, a las 09:45.')
+showNyTxt = input(true, 'Mostrar texto', group = group_orbr)
+group_br = '🟦 Initial Balance del día'
+dayShow = input(false, 'Dibujar el Initial Balance', group = group_br)
+dayRange = input.session('0930-1030', '  Horario del Initial Balance', inline = 'DY', group = group_br, display = display)
+dayColor = input.color(#00bcf480, '  Color', inline = 'DYC', group = group_br)
+dayLineS = input.string('Dashed', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'DYC', group = group_br, display = display)
+dayTrans = input.int(85, 'Opacidad', minval = 0, maxval = 100, inline = 'DYC', group = group_br, display = display)
+dayHistory = input.int(0, "  Rangos históricos", minval = 0, group = group_br, display = display)
+showIbTxt = input(true, 'Mostrar texto', group = group_br)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · NUEVO · Niveles de Asia y Londres
+//---------------------------------------------------------------------------------------------------------------------{
+gSess = '🌏 NIVELES DE ASIA Y LONDRES'
+sessOn      = input.bool(true, 'Dibujar el máximo y el mínimo de Asia y Londres', group = gSess, tooltip = 'Son las bolsas de liquidez que el precio suele ir a buscar durante la sesión de Nueva York. Se calculan de madrugada y quedan dibujadas para todo el día.')
+sessAsiaTxt = input.session('2000-0200', '   Horario de Asia (hora de NY)', group = gSess, display = display)
+sessLonTxt  = input.session('0200-0800', '   Horario de Londres (hora de NY)', group = gSess, display = display)
+sessCut     = input.bool(true, '   Dejar de extender la línea al ser barrida', group = gSess, tooltip = 'Basta con que una mecha toque el nivel. La línea se congela en esa vela, así distingues de un vistazo la liquidez ya tomada de la que sigue viva. Si lo apagas, las líneas se extienden siempre hasta la vela actual.')
+sessShowTxt = input.bool(true, '   Escribir el nombre del nivel (ASIA H, LON L…)', group = gSess)
+sessFromOpen= input.bool(false, '   Arrancar la línea en el inicio de la madrugada', group = gSess, tooltip = 'Por defecto la línea empieza en la vela que hizo el máximo o el mínimo. Si prefieres que cruce toda la sesión de Asia o de Londres de lado a lado, activa esto.')
+sessKeep    = input.int(1, '   Madrugadas a mantener dibujadas', minval = 1, maxval = 10, group = gSess, display = display)
+sessColor   = input.color(#000000, '   Color', inline = 'SS', group = gSess)
+sessStyleS  = input.string('Solid', '', options = ['Solid', 'Dashed', 'Dotted'], inline = 'SS', group = gSess, display = display)
+sessWidth   = input.int(1, 'Grosor', minval = 1, maxval = 4, inline = 'SS', group = gSess, display = display)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · NUEVO · FVG de M15 y H1
+//---------------------------------------------------------------------------------------------------------------------{
+gFvg = '📦 FVG · huecos de valor justo (M15 y H1)'
+fvgOn      = input.bool(true, 'Dibujar los FVG', group = gFvg, tooltip = 'Hueco de tres velas: la primera y la tercera no llegan a tocarse. El recuadro arranca en la vela del medio, pero solo aparece en pantalla cuando cierra la tercera vela de esa temporalidad. Es normal verlo saltar ya extendido hacia la izquierda.')
+fvgOnA     = input.bool(true, '   FVG de la temporalidad media', inline = 'F1', group = gFvg)
+fvgTfA     = input.timeframe('15', '', inline = 'F1', group = gFvg, display = display)
+fvgOnB     = input.bool(true, '   FVG de la temporalidad alta', inline = 'F2', group = gFvg)
+fvgTfB     = input.timeframe('60', '', inline = 'F2', group = gFvg, display = display)
+fvgCut     = input.bool(true, '   Dejar de extender al primer toque (mecha o cuerpo)', group = gFvg)
+fvgShowTxt = input.bool(true, '   Escribir la temporalidad dentro del recuadro', group = gFvg)
+fvgKeep    = input.int(3, '   FVG a mantener por temporalidad', minval = 1, maxval = 20, group = gFvg, display = display)
+fvgMinPts  = input.float(0, '   Ignorar huecos menores a (puntos)', step = 0.25, minval = 0, group = gFvg, display = display, tooltip = 'Filtro de ruido. En 0 se dibujan todos. En MNQ un valor de 10-15 quita los huecos insignificantes; en MES basta con 1-2.')
+fvgColor   = input.color(color.new(#9e9e9e, 78), '   Relleno', inline = 'FC', group = gFvg)
+fvgBorder  = input.color(color.new(#757575, 45), 'Borde', inline = 'FC', group = gFvg)
+fvgTxtCol  = input.color(#424242, 'Texto', inline = 'FC', group = gFvg)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · NUEVO · Perfil de volumen / heatmap
+//---------------------------------------------------------------------------------------------------------------------{
+gVp = '🔥 PERFIL DE VOLUMEN · heatmap detrás de las velas'
+vpOn      = input.bool(true, 'Activar el perfil de volumen', group = gVp, tooltip = 'NO es un heatmap de órdenes tipo Bookmap: eso necesita el libro de órdenes y Pine no lo recibe, ningún indicador puede. Esto reparte el volumen YA EJECUTADO por niveles de precio. Muestra dónde hubo dinero de verdad, no dónde alguien dice que quiere operar, así que tampoco se puede falsear con spoofing.')
+vpAnchor  = input.string('Sesión de NY', 'Calcular desde', options = ['Sesión de NY', 'Día completo'], group = gVp, display = display)
+vpLtf     = input.timeframe('1', 'Temporalidad interna del reparto', group = gVp, display = display, tooltip = 'De aquí sale el detalle del perfil. Cuanto más fina, más preciso y más pesado. 1 minuto es el punto de equilibrio; con segundos el script puede tardar demasiado.')
+vpRows    = input.int(48, 'Niveles de precio', minval = 6, maxval = 90, group = gVp, display = display, tooltip = 'Cada nivel es una caja. Ojo: el indicador tiene un tope de 500 cajas repartidas entre esto, los FVG y las operaciones.')
+vpMode    = input.string('Barras a la derecha', 'Cómo dibujarlo', options = ['Barras a la derecha', 'Heatmap de fondo'], group = gVp, display = display, tooltip = 'Barras: el perfil se dibuja en el hueco a la derecha de la última vela, sin taparte el precio. Es la forma legible. Heatmap: bandas de color por detrás de las velas; sirve para ver la zona de un vistazo, pero ensucia el gráfico.')
+vpWidth   = input.int(20, '   Barras · largo del nivel más cargado (velas)', minval = 5, maxval = 100, group = gVp, display = display)
+vpBarTr   = input.int(46, '   Barras · transparencia', minval = 0, maxval = 90, group = gVp, display = display)
+vpMaxTr   = input.int(96, '   Heatmap · transparencia del nivel más flojo', minval = 50, maxval = 99, group = gVp, display = display)
+vpMinTr   = input.int(66, '   Heatmap · transparencia del nivel más cargado', minval = 20, maxval = 95, group = gVp, display = display)
+vpColBase = input.color(#2196f3, '   Color base', inline = 'VC', group = gVp)
+vpPocBar  = input.color(#ff8f00, 'Barra del POC', inline = 'VC', group = gVp)
+vpVaOn    = input.bool(true, 'Área de valor (donde se hizo el X % del volumen)', inline = 'VA', group = gVp, tooltip = 'El POC es un solo precio y suele quedar pegado al VWAP, así que por sí solo dice poco. El área de valor es la zona donde de verdad se negoció la sesión: sus bordes (VAH y VAL) son los niveles que marcan si el precio está en zona normal o se ha ido a un extremo.')
+vpVaPct   = input.int(70, '', minval = 40, maxval = 95, inline = 'VA', group = gVp, display = display)
+vpVaCol   = input.color(#546e7a, '', inline = 'VA', group = gVp)
+vpPocOn   = input.bool(true, 'Línea del POC (precio más negociado)', inline = 'VP', group = gVp)
+vpPocSpan = input.string('Solo junto al perfil', '   Hasta dónde llega la línea del POC', options = ['Solo junto al perfil', 'Toda la sesión'], group = gVp, display = display, tooltip = 'La línea del POC arranca en las 09:30, igual que el rango de apertura, y por eso se confunde con las líneas del ORB. Con "solo junto al perfil" se queda pegada a las barras, a la derecha del precio, y no ensucia el gráfico.')
+vpPocCol  = input.color(#0d47a1, '', inline = 'VP', group = gVp)
+vpNodes   = input.bool(true, 'Colorear los nodos de alto y bajo volumen', group = gVp)
+vpHvnPct  = input.int(70, '   HVN: nivel por encima del X % del POC', minval = 30, maxval = 99, inline = 'VN', group = gVp, display = display)
+vpHvnCol  = input.color(#1565c0, '', inline = 'VN', group = gVp)
+vpLvnPct  = input.int(18, '   LVN: nivel por debajo del X % del POC', minval = 1, maxval = 50, inline = 'VL', group = gVp, display = display)
+vpLvnCol  = input.color(#cfd8dc, '', inline = 'VL', group = gVp)
+vpTpChk   = input.bool(true, 'Avisar si un TP queda detrás de un nodo de alto volumen', group = gVp, tooltip = 'Un HVN entre el precio y tu objetivo es donde el precio se atasca: ahí es donde te planteas cerrar antes. Un LVN es un hueco por el que pasa rápido: ahí dejas correr.')
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · Motor de señales
+//---------------------------------------------------------------------------------------------------------------------{
+gSig = '⚡ SEÑALES · Manipulación del rango + cruce VWAP'
+sigOn       = input.bool(true, 'Activar motor de señales', group = gSig)
+freezeOn    = input.bool(true, 'Congelar el indicador al terminar la ventana de entradas', group = gSig, tooltip = 'A las 12:00 se para todo: las líneas dejan de extenderse, el perfil de volumen deja de acumular y el motor deja de buscar rupturas. Sin esto, la sesión nocturna sigue entrando en los cálculos del día y el panel acaba marcando cosas que ya no significan nada.\n\nTodo vuelve a arrancar en la apertura del día de futuros, a las 18:00.')
+brkMode     = input.string('Mecha (barrido)', '① Ruptura del rango por', options = ['Mecha (barrido)', 'Cierre'], group = gSig, display = display, tooltip = 'Mecha: basta que el precio pinche el nivel (recomendado). Cierre: exige cierre de vela fuera del rango.')
+needReentry = input.bool(true, '② Exigir reingreso al rango antes de la entrada', group = gSig)
+useBarLim   = input.bool(false, '   Invalidar si tarda más de N velas en reingresar', inline = 'RL', group = gSig)
+barLim      = input.int(40, '', minval = 2, inline = 'RL', group = gSig, display = display)
+entryWinSes = input.session('0945-1200', 'Ventana horaria de entradas', group = gSig, display = display)
+maxSigs     = input.int(1, 'Máximo de operaciones por día', minval = 1, maxval = 10, group = gSig, display = display)
+oneAtTime   = input.bool(true, 'Una operación a la vez', group = gSig)
+showOrLv    = input.bool(false, 'Líneas azules extra del rango (duplican las del rango, apagadas)', group = gSig, tooltip = 'Las líneas del propio rango de apertura ya se extienden solas durante todo el día. Esta opción dibujaba un segundo par encima, y por eso se veían dobles.')
+keepTrades  = input.int(6, 'Operaciones a mantener dibujadas', minval = 1, maxval = 20, group = gSig, display = display)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · Marcas en el gráfico  (colores libres para fondo claro)
+//---------------------------------------------------------------------------------------------------------------------{
+gMark = '🎨 MARCAS EN LAS VELAS'
+markBreak    = input.bool(true, '① Marcar la vela que ROMPE el rango', group = gMark, tooltip = 'Primera condición. Vale mecha o cierre, hacia arriba o hacia abajo. No es la entrada.')
+colBreakBar  = input.color(#ff6d00, '   Color de la vela de ruptura', group = gMark)
+brkSameCol   = input.bool(true, '   Usar el mismo color hacia arriba y hacia abajo', inline = 'BD', group = gMark)
+colBreakUp   = input.color(#2e7d32, '   ↑', inline = 'BD2', group = gMark)
+colBreakDn   = input.color(#c62828, '   ↓', inline = 'BD2', group = gMark)
+markBrkShape = input.bool(false, '   Añadir la etiqueta ORB sobre/bajo la vela', group = gMark)
+markEntry    = input.bool(true, '② Marcar la vela que CIERRA cruzando el VWAP', group = gMark, tooltip = 'Segunda condición = entrada. Solo cuenta el cierre, no la mecha.')
+colEntryBar  = input.color(#7b1fa2, '   Color de la vela de confirmación', group = gMark)
+entSameCol   = input.bool(true, '   Usar el mismo color en largo y en corto', inline = 'ED', group = gMark)
+colEntryUp   = input.color(#4a148c, '   ↑', inline = 'ED2', group = gMark)
+colEntryDn   = input.color(#880e4f, '   ↓', inline = 'ED2', group = gMark)
+markEntShape = input.bool(true, '   Añadir flecha de entrada', group = gMark)
+showLabels   = input.bool(false, '   Etiqueta flotante con entrada, SL y TPs', group = gMark, tooltip = 'Apagada por defecto para no ensuciar el gráfico. Los niveles ya se ven en las líneas de SL y TP.')
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · Stop Loss y Take Profit
+//---------------------------------------------------------------------------------------------------------------------{
+gRisk = '🎯 STOP LOSS y TAKE PROFIT'
+slMode      = input.string('Extremo de la manipulación', 'Cálculo del Stop Loss', options = ['Extremo de la manipulación', 'Extremo del rango 09:30-09:45', 'ATR', 'Puntos fijos'], group = gRisk, display = display)
+slBufTicks  = input.int(2, 'Colchón del stop (ticks)', minval = 0, group = gRisk, display = display)
+atrLen      = input.int(14, 'ATR · periodo', minval = 1, inline = 'AT', group = gRisk, display = display)
+atrMult     = input.float(1.5, 'x', step = 0.1, minval = 0.1, inline = 'AT', group = gRisk, display = display)
+fixedSlPts  = input.float(20, 'Stop fijo (puntos)', step = 0.25, minval = 0.25, group = gRisk, display = display)
+tp1R        = input.float(1.0, 'TP1 (R)', step = 0.25, minval = 0.25, inline = 'TP', group = gRisk, display = display)
+tp2R        = input.float(1.5, 'TP2 (R)', step = 0.25, minval = 0.25, inline = 'TP', group = gRisk, display = display)
+tp3R        = input.float(2.0, 'TP3 (R)', step = 0.25, minval = 0.25, inline = 'TP', group = gRisk, display = display)
+useMinStop  = input.bool(false, 'Descartar si el stop es menor a (pts)', inline = 'MN', group = gRisk)
+minStopPts  = input.float(5, '', step = 0.25, inline = 'MN', group = gRisk, display = display)
+stopFilterMode   = input.string('Múltiplo del rango', 'Descartar señales con stop demasiado grande', options = ['Múltiplo del rango', 'Puntos fijos', 'Sin filtro'], group = gRisk, tooltip = 'Múltiplo del rango: se adapta solo a MNQ, MES y MYM porque usa el tamaño del rango de apertura de cada activo. Con puntos fijos hay que calibrar uno distinto por instrumento.')
+maxStopRangeMult = input.float(2.5, '   Máximo = X veces el tamaño del rango', step = 0.25, minval = 0.25, group = gRisk, display = display)
+maxStopPts       = input.float(80, '   Máximo en puntos', step = 0.25, minval = 0.25, group = gRisk, display = display)
+beAfterTp1  = input.bool(true, 'Mover el stop a break-even tras TP1', group = gRisk, tooltip = 'Cuando el precio toca TP1, el stop pasa al precio de entrada. Al activarse lo verás en el gráfico: la línea de entrada se vuelve ROJA (ahí está el stop ahora) y la línea del stop original queda PUNTEADA y desvaída, para que sigas viendo dónde estaba el máximo de la estructura.')
+closeAtEnd  = input.bool(true, 'Cerrar la operación al terminar la ventana horaria', group = gRisk)
+colSl       = input.color(#e53935, 'Colores  SL', inline = 'CL', group = gRisk)
+colTp       = input.color(#00897b, 'TP', inline = 'CL', group = gRisk)
+colEntryLn  = input.color(#f9a825, 'Entrada', inline = 'CL', group = gRisk)
+showZones   = input.bool(true, 'Sombrear zona de riesgo y de beneficio', group = gRisk)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings · Multi-activo y paneles
+//---------------------------------------------------------------------------------------------------------------------{
+gMulti = '📊 PANELES MULTI-ACTIVO'
+sym1     = input.symbol('CME_MINI:MNQ1!', 'Activo 1', inline = 'S1', group = gMulti)
+nm1      = input.string('MNQ', '', inline = 'S1', group = gMulti, display = display)
+sym2     = input.symbol('CME_MINI:MES1!', 'Activo 2', inline = 'S2', group = gMulti)
+nm2      = input.string('MES', '', inline = 'S2', group = gMulti, display = display)
+sym3     = input.symbol('CBOT_MINI:MYM1!', 'Activo 3', inline = 'S3', group = gMulti)
+nm3      = input.string('MYM', '', inline = 'S3', group = gMulti, display = display)
+
+showTrend = input.bool(true, 'Panel de TENDENCIA', inline = 'PT', group = gMulti)
+trendPos  = input.string('Arriba derecha', '', options = ['Arriba derecha', 'Arriba centro', 'Arriba izquierda', 'Centro derecha', 'Centro izquierda', 'Abajo derecha', 'Abajo centro', 'Abajo izquierda'], inline = 'PT', group = gMulti, display = display)
+trendSize = input.string('Diminuto', '', options = ['Diminuto', 'Pequeño', 'Normal'], inline = 'PT', group = gMulti, display = display)
+
+showSetup = input.bool(true, 'Panel de SETUP (3 activos)', inline = 'PS', group = gMulti)
+setupPos  = input.string('Abajo izquierda', '', options = ['Arriba derecha', 'Arriba centro', 'Arriba izquierda', 'Centro derecha', 'Centro izquierda', 'Abajo derecha', 'Abajo centro', 'Abajo izquierda'], inline = 'PS', group = gMulti, display = display)
+setupSize = input.string('Diminuto', '', options = ['Diminuto', 'Pequeño', 'Normal'], inline = 'PS', group = gMulti, display = display)
+multiAlerts = input.bool(true, 'Alertas de los 3 activos desde un solo gráfico', group = gMulti)
+
+panelBg   = input.color(color.new(#ffffff, 12), 'Fondo de los paneles', inline = 'PB', group = gMulti)
+panelTx   = input.color(#212121, 'Texto', inline = 'PB', group = gMulti)
+panelHdr  = input.color(#37474f, 'Cabecera', inline = 'PB', group = gMulti)
+
+gBias = '🧭 BIAS / TENDENCIA'
+biasTfMid   = input.timeframe('15', 'Temporalidad media', group = gBias, display = display)
+biasTfHigh  = input.timeframe('60', 'Temporalidad alta', group = gBias, display = display)
+biasMaLen   = input.int(21, 'Media para el bias (EMA)', minval = 2, group = gBias, display = display)
+useBiasFilt = input.bool(false, 'Filtrar señales del gráfico actual según el bias', group = gBias, tooltip = 'Si se activa, solo se abren LARGOS con bias alcista y CORTOS con bias bajista.')
+
+gAlign      = '🧲 FILTRO DE ALINEACIÓN · VWAP del día'
+alignOn     = input.bool(false, 'Descartar los fades que van contra la dirección del día', group = gAlign, tooltip = 'Mira de qué lado barrieron, no la dirección de tu operación.\n\nDía bajista (precio bajo el VWAP del día): barren el máximo -> es toma de liquidez, el corto PASA. Barren el mínimo -> es continuación, el largo se BLOQUEA.\nDía alcista: al revés.\n\nSe queda con los fades cuyo barrido fue contra el día, que son los que de verdad son manipulación. Te quita alrededor de la mitad de las señales.')
+alignDead   = input.float(0.15, '   Zona muerta (X veces el tamaño del rango)', step = 0.05, minval = 0, maxval = 1, group = gAlign, display = display, tooltip = 'Si el precio está pegado al VWAP del día, el día no tiene dirección clara y el filtro NO bloquea nada: la señal pasa como hasta ahora. Solo corta cuando la dirección es evidente. En 0 el filtro opina siempre, incluso con el precio rozando el VWAP.')
+alignMark   = input.bool(true, '   Marcar en el gráfico las señales descartadas', group = gAlign, tooltip = 'Una equis gris donde habría habido señal. Sirve para recorrer el histórico y auditar qué te está quitando el filtro antes de fiarte de él.')
+contOn      = input.bool(false, 'MODO CONTINUACIÓN · en vez de descartar, operar a favor del día', group = gAlign, tooltip = 'Necesita el filtro de alineación encendido.\n\nEn un día bajista: el rango se rompe por abajo, el precio regresa, sube a buscar el VWAP de NY y FALLA. Cuando una vela cierra cruzando el VWAP hacia abajo, entra CORTO a favor del día en vez de darte el largo del fade.\n\nEl stop va al máximo del tramo que estuvo por encima del VWAP, y los TPs salen de ahí con tus mismos múltiplos de R.\n\nLa condición de que el rango se haya roto antes SIGUE siendo obligatoria: sin manipulación previa no hay entrada.')
+colContUp   = input.color(#00838f, '   Color de las entradas de continuación  ↑', inline = 'CC', group = gAlign)
+colContDn   = input.color(#00838f, '↓', inline = 'CC', group = gAlign)
+biasFiltMode= input.string('Solo temporalidad alta', 'Modo del filtro', options = ['Solo temporalidad alta', 'Solo temporalidad media', 'Ambas deben coincidir'], group = gBias, display = display)
+instrPreset = input.string('MNQ ($2 / pt)', 'Instrumento (riesgo en $)', options = ['MNQ ($2 / pt)', 'MES ($5 / pt)', 'MYM ($0.50 / pt)', 'Personalizado'], group = gBias, display = display)
+customPtVal = input.float(2.0, 'Valor del punto personalizado ($)', step = 0.25, minval = 0.01, group = gBias, display = display)
+contracts   = input.int(1, 'Contratos', minval = 1, group = gBias, display = display)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// User Defined Types
+//---------------------------------------------------------------------------------------------------------------------{
+type VWAP
+    chart.point []  points
+    polyline    []  lines
+type VWAPD
+    chart.point []  points
+    polyline        lines
+type RANGE
+    line     []  upperLine
+    line     []  lowerLine
+    box      []  BGnTXT
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Functions / Methods (original)
+//---------------------------------------------------------------------------------------------------------------------{
+getStyle(style) =>
+    switch style
+        'Solid' => line.style_solid
+        'Dashed' => line.style_dashed
+        'Dotted' => line.style_dotted
+renderPolyline(source, anchor, color, style, historical, width) =>
+    var VWAP vwapArray = VWAP.new(array.new<chart.point>(na), array.new<polyline>(na))
+    if anchor
+        vwapArray.lines.push(polyline.new(vwapArray.points, false, false, line_color = color, line_width = width, line_style = getStyle(style)))
+        vwapArray.points.clear()
+        vwapArray.points.push(chart.point.from_time(time, source))
+        if vwapArray.lines.size() > historical
+            vwapArray.lines.shift().delete()
+    else
+        vwapArray.points.push(chart.point.from_time(time, source))
+        if vwapArray.points.size() == 2002
+            vwapArray.points.remove(1)
+    if barstate.islast
+        if vwapArray.lines.size() > historical
+            vwapArray.lines.last().delete()
+        vwapArray.lines.push(polyline.new(vwapArray.points, false, false, line_color = color, line_width = width, xloc = xloc.bar_time, line_style = getStyle(style)))
+renderVwap(isVoly, source, anchor, color, style, show1, mult1, color1, style1, historical) =>
+    [vwap, upper, _] = ta.vwap(source, anchor, 1)
+    if isVoly and vwap > 0
+        renderPolyline(vwap, anchor, color, style, historical, 2)
+        if show1
+            bandBasis = upper - vwap
+            renderPolyline(vwap + bandBasis * mult1, anchor, color1, style1, historical, 1)
+            renderPolyline(vwap - bandBasis * mult1, anchor, color1, style1, historical, 1)
+renderVwap(isVoly, source, aIndex, color, style) =>
+    if isVoly and barstate.islast
+        var VWAPD vwapType = VWAPD.new(array.new<chart.point>(na))
+        var srcVolArray = array.new_float(na)
+        var volArray = array.new_float(na)
+        srcVolArray.clear(), volArray.clear(), vwapType.points.clear(), vwapType.lines.delete()
+        len = bar_index - aIndex
+        for index = len to 0
+            srcVolArray.push(source[index] * volume[index])
+            volArray.push(volume[index])
+            vwapType.points.push(chart.point.from_time(time[index], srcVolArray.sum() / volArray.sum()))
+            if vwapType.points.size() == 2002
+                vwapType.points.remove(1)
+        vwapType.lines := polyline.new(vwapType.points, false, false, line_color = color, line_style = getStyle(style), xloc = xloc.bar_time, line_width = 2)
+renderRange(_show, _range, _utc, _color, _trans, historical, BGnTXT, style, show_text) =>
+    if _show
+        var RANGE rangeArray = RANGE.new(array.new<line>(na), array.new<line>(na), array.new<box>(na))
+        session = not na(time(timeframe.period, _range, _utc))
+        if session and session != session[1]
+            rangeArray.upperLine.push(line.new(time, high, time + 1, high, xloc.bar_time, extend.none, _color, getStyle(style), 1))
+            rangeArray.lowerLine.push(line.new(time, low , time + 1, low , xloc.bar_time, extend.none, _color, getStyle(style), 1))
+            rangeArray.BGnTXT.push(box.new(time, high, time + 1, low, xloc = xloc.bar_time, text = show_text ? BGnTXT + ' ' + _range : na, text_size = size.tiny, text_halign = text.align_right, text_valign = BGnTXT == 'Opening Range' ? text.align_center : text.align_top, text_color = color.new(_color, 25), bgcolor = color.new(_color, _trans), border_color = color(na)))
+            if rangeArray.upperLine.size() > historical + 1
+                rangeArray.upperLine.shift().delete()
+                rangeArray.lowerLine.shift().delete()
+                rangeArray.BGnTXT.shift().delete()
+        if session and rangeArray.upperLine.size() > 0
+            lnh = rangeArray.upperLine.last(), lnh.set_y1(math.max(high, lnh.get_y1())), lnh.set_y2(math.max(high, lnh.get_y2())), lnh.set_x2(time + 1)
+            lnl = rangeArray.lowerLine.last(), lnl.set_y1(math.min(low , lnl.get_y1())), lnl.set_y2(math.min(low, lnl.get_y2())), lnl.set_x2(time + 1)
+            btx = rangeArray.BGnTXT.last(), btx.set_top(math.max(high, lnh.get_y1())), btx.set_bottom(math.min(low, lnl.get_y1())), btx.set_right(time + 1)
+        if rangeArray.upperLine.size() > 0
+            lnh = rangeArray.upperLine.last(), lnh.set_x2(time + 1)
+            lnl = rangeArray.lowerLine.last(), lnl.set_x2(time + 1)
+            btx = rangeArray.BGnTXT.last(), btx.set_right(time + 1)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Functions / Methods (nuevas)
+//---------------------------------------------------------------------------------------------------------------------{
+f_biasTxt(int b) => b == 1 ? 'ALCISTA' : b == -1 ? 'BAJISTA' : 'PLANO'
+f_biasArw(int b) => b == 1 ? '▲' : b == -1 ? '▼' : '•'
+f_biasCol(int b) => b == 1 ? #2e7d32 : b == -1 ? #c62828 : #9e9e9e
+f_px(float p)    => na(p) ? '—' : str.tostring(p, format.mintick)
+
+// '60' -> 'H1',  '15' -> 'M15',  '240' -> 'H4',  'D' -> 'D1' ...
+f_tfLabel(simple string tf) =>
+    switch str.upper(tf)
+        '1'   => 'M1'
+        '2'   => 'M2'
+        '3'   => 'M3'
+        '5'   => 'M5'
+        '10'  => 'M10'
+        '15'  => 'M15'
+        '30'  => 'M30'
+        '45'  => 'M45'
+        '60'  => 'H1'
+        '120' => 'H2'
+        '180' => 'H3'
+        '240' => 'H4'
+        '360' => 'H6'
+        '480' => 'H8'
+        '720' => 'H12'
+        'D'   => 'D1'
+        'W'   => 'W1'
+        'M'   => 'MN'
+        => tf
+
+// Valida el tamano del stop. Se usa igual en el grafico y en el panel multi-activo,
+// para que el panel no marque una senal que despues no se dibuja.
+f_sizeOk(r, oh, ol) =>
+    bool ok = r > 0
+    if ok and useMinStop and r < minStopPts
+        ok := false
+    if ok and stopFilterMode == 'Puntos fijos' and r > maxStopPts
+        ok := false
+    if ok and stopFilterMode == 'Múltiplo del rango'
+        rng = oh - ol
+        if not na(rng) and rng > 0 and r > rng * maxStopRangeMult
+            ok := false
+    ok
+
+f_pos(string p) =>
+    switch p
+        'Arriba derecha'   => position.top_right
+        'Arriba centro'    => position.top_center
+        'Arriba izquierda' => position.top_left
+        'Centro derecha'   => position.middle_right
+        'Centro izquierda' => position.middle_left
+        'Abajo derecha'    => position.bottom_right
+        'Abajo centro'     => position.bottom_center
+        => position.bottom_left
+
+f_size(string sz) =>
+    switch sz
+        'Diminuto' => size.tiny
+        'Pequeño'  => size.small
+        => size.normal
+
+// Maximo y minimo de una sesion nocturna. OJO: se llama SIEMPRE en el flujo principal,
+// nunca dentro de un if, porque lleva variables var dentro.
+f_sessRange(simple string sess) =>
+    var float hi  = na
+    var float lo  = na
+    var int   hiB = na
+    var int   loB = na
+    var int   sB  = na
+    inS = not na(time(timeframe.period, sess, 'America/New_York'))
+    if inS and not inS[1]
+        hi  := high
+        lo  := low
+        hiB := bar_index
+        loB := bar_index
+        sB  := bar_index
+    else if inS
+        // Si el grafico empieza con la sesion ya empezada, esta es la primera vela que vemos.
+        if na(sB)
+            sB := bar_index
+        if na(hi) or high > hi
+            hi  := high
+            hiB := bar_index
+        if na(lo) or low < lo
+            lo  := low
+            loB := bar_index
+    dn = not inS and inS[1]
+    [hi, lo, hiB, loB, sB, dn]
+
+// Patron de 3 velas evaluado sobre velas YA CERRADAS de la temporalidad pedida: [3], [2], [1].
+// Devuelve el hueco y el tiempo de la vela del medio, que es donde arranca el recuadro.
+// Al usar solo velas cerradas no repinta.
+f_fvg() =>
+    bullG = low[1] > high[3]
+    bearG = high[1] < low[3]
+    float bt = na
+    float tp = na
+    if bullG
+        bt := high[3]
+        tp := low[1]
+    else if bearG
+        bt := high[1]
+        tp := low[3]
+    hasG = bullG or bearG
+    midT = time[2]
+    [bt, tp, hasG, midT]
+
+// Estado completo del setup para CUALQUIER simbolo (se ejecuta dentro de request.security)
+f_setupState() =>
+    inOR_    = not na(time(timeframe.period, nyRange, 'America/New_York'))
+    orStart_ = inOR_ and not inOR_[1]
+    orEnd_   = not inOR_ and inOR_[1]
+    inWin_   = not na(time(timeframe.period, entryWinSes, 'America/New_York'))
+
+    var float oh_  = na
+    var float ol_  = na
+    var bool  rdy_ = false
+    if orStart_
+        oh_ := high
+        ol_ := low
+        rdy_ := false
+    else if inOR_
+        oh_ := math.max(oh_, high)
+        ol_ := math.min(ol_, low)
+    if orEnd_
+        rdy_ := true
+
+    [vw_, vwU_, vwL_] = ta.vwap(ohlc4, orStart_, 1)
+    // El VWAP del dia de ESTE simbolo, para que el panel aplique el mismo filtro de alineacion que el grafico.
+    [dv_, dvU_, dvL_] = ta.vwap(ohlc4, timeframe.change('D'), 1)
+
+    var int   bd_    = 0
+    var bool  re_    = false
+    var int   fired_ = 0
+    var float sw_    = na
+    // Seguimiento del resultado de la operacion del dia:
+    //   lvl_ -> TP mas alto alcanzado (0, 1, 2 o 3)      stp_ -> salio por stop ANTES de llegar a TP1
+    //   td_  -> direccion mientras la operacion sigue viva
+    var int   lvl_ = 0
+    var bool  stp_ = false
+    var int   td_  = 0
+    var float ent_ = na
+    var float sl_  = na
+    var float tp1p_ = na
+    var float tp2p_ = na
+    var float tp3p_ = na
+    if orStart_
+        bd_ := 0
+        re_ := false
+        fired_ := 0
+        sw_ := na
+        lvl_ := 0
+        stp_ := false
+        td_  := 0
+        ent_ := na
+        sl_  := na
+        tp1p_ := na
+        tp2p_ := na
+        tp3p_ := na
+
+    bu_ = rdy_ and (brkMode == 'Cierre' ? close > oh_ : high > oh_)
+    bn_ = rdy_ and (brkMode == 'Cierre' ? close < ol_ : low  < ol_)
+
+    if rdy_ and inWin_
+        if bd_ == 0
+            if bu_
+                bd_ := 1
+                re_ := false
+                sw_ := high
+            else if bn_
+                bd_ := -1
+                re_ := false
+                sw_ := low
+        else if bd_ == 1
+            sw_ := math.max(nz(sw_, high), high)
+            if not re_ and close < oh_
+                re_ := true
+        else if bd_ == -1
+            sw_ := math.min(nz(sw_, low), low)
+            if not re_ and close > ol_
+                re_ := true
+
+    cu_ = ta.crossover(close, vw_)
+    cd_ = ta.crossunder(close, vw_)
+
+    buf_ = slBufTicks * syminfo.mintick
+    atr_ = ta.atr(atrLen)
+    slL_ = slMode == 'Extremo de la manipulación' ? nz(sw_, low) - buf_ : slMode == 'Extremo del rango 09:30-09:45' ? ol_ - buf_ : slMode == 'ATR' ? close - atr_ * atrMult : close - fixedSlPts
+    slS_ = slMode == 'Extremo de la manipulación' ? nz(sw_, high) + buf_ : slMode == 'Extremo del rango 09:30-09:45' ? oh_ + buf_ : slMode == 'ATR' ? close + atr_ * atrMult : close + fixedSlPts
+
+    dd_  = na(dv_) or na(oh_) or na(ol_) or oh_ <= ol_ ? 0 : close > dv_ + (oh_ - ol_) * alignDead ? 1 : close < dv_ - (oh_ - ol_) * alignDead ? -1 : 0
+    alL_ = not alignOn or dd_ >= 0
+    alS_ = not alignOn or dd_ <= 0
+
+    // Tramos a cada lado del VWAP de NY, para el stop de las entradas de continuacion.
+    ab_ = not na(vw_) and close > vw_
+    bl_ = not na(vw_) and close < vw_
+    var float lgH_ = na
+    var float lgL_ = na
+    if ab_ and not ab_[1]
+        lgH_ := high
+    else if ab_
+        lgH_ := math.max(nz(lgH_, high), high)
+    if bl_ and not bl_[1]
+        lgL_ := low
+    else if bl_
+        lgL_ := math.min(nz(lgL_, low), low)
+    scS_ = slMode == 'ATR' ? close + atr_ * atrMult : slMode == 'Puntos fijos' ? close + fixedSlPts : math.max(nz(lgH_, high), high) + buf_
+    scL_ = slMode == 'ATR' ? close - atr_ * atrMult : slMode == 'Puntos fijos' ? close - fixedSlPts : math.min(nz(lgL_, low),  low)  - buf_
+    ct_  = contOn and alignOn
+
+    bool jf_ = false
+    if rdy_ and inWin_ and fired_ == 0 and not na(vw_)
+        if bd_ == 1 and (not needReentry or re_) and cd_ and alS_ and f_sizeOk(slS_ - close, oh_, ol_)
+            r_     = slS_ - close
+            fired_ := -1
+            jf_    := true
+            td_    := -1
+            ent_   := close
+            sl_    := slS_
+            tp1p_  := close - r_ * tp1R
+            tp2p_  := close - r_ * tp2R
+            tp3p_  := close - r_ * tp3R
+        else if bd_ == -1 and (not needReentry or re_) and cu_ and alL_ and f_sizeOk(close - slL_, oh_, ol_)
+            r_     = close - slL_
+            fired_ := 1
+            jf_    := true
+            td_    := 1
+            ent_   := close
+            sl_    := slL_
+            tp1p_  := close + r_ * tp1R
+            tp2p_  := close + r_ * tp2R
+            tp3p_  := close + r_ * tp3R
+        // Continuacion: el fade quedaba bloqueado por el filtro, la entrada se toma a favor del dia.
+        // fired_ = ±2 para distinguirlas de los fades en el panel y en las alertas.
+        else if ct_ and dd_ == -1 and bd_ == -1 and (not needReentry or re_) and cd_ and f_sizeOk(scS_ - close, oh_, ol_)
+            r_     = scS_ - close
+            fired_ := -2
+            jf_    := true
+            td_    := -1
+            ent_   := close
+            sl_    := scS_
+            tp1p_  := close - r_ * tp1R
+            tp2p_  := close - r_ * tp2R
+            tp3p_  := close - r_ * tp3R
+        else if ct_ and dd_ == 1 and bd_ == 1 and (not needReentry or re_) and cu_ and f_sizeOk(close - scL_, oh_, ol_)
+            r_     = close - scL_
+            fired_ := 2
+            jf_    := true
+            td_    := 1
+            ent_   := close
+            sl_    := scL_
+            tp1p_  := close + r_ * tp1R
+            tp2p_  := close + r_ * tp2R
+            tp3p_  := close + r_ * tp3R
+
+    // Seguimiento del resultado, a partir de la vela SIGUIENTE a la de entrada.
+    // El stop se comprueba PRIMERO y con su valor de la vela anterior: si una misma vela
+    // toca el stop y un TP, manda el stop. Es el caso malo y asi no se pinta de mas.
+    // Tras TP1 el stop pasa a break-even, igual que en el grafico, y la operacion sigue
+    // viva buscando TP2 y TP3: por eso una salida en BE conserva los chulos ya ganados.
+    if td_ != 0 and not jf_
+        bool out_ = td_ == 1 ? low <= sl_ : high >= sl_
+        if out_
+            if lvl_ == 0
+                stp_ := true
+            td_ := 0
+        else
+            if td_ == 1
+                if lvl_ < 1 and high >= tp1p_
+                    lvl_ := 1
+                    sl_ := beAfterTp1 ? ent_ : sl_
+                if lvl_ < 2 and high >= tp2p_
+                    lvl_ := 2
+                if lvl_ < 3 and high >= tp3p_
+                    lvl_ := 3
+                    td_  := 0
+            else
+                if lvl_ < 1 and low <= tp1p_
+                    lvl_ := 1
+                    sl_ := beAfterTp1 ? ent_ : sl_
+                if lvl_ < 2 and low <= tp2p_
+                    lvl_ := 2
+                if lvl_ < 3 and low <= tp3p_
+                    lvl_ := 3
+                    td_  := 0
+
+    winEnd_ = not inWin_ and inWin_[1]
+    if closeAtEnd and winEnd_ and td_ != 0
+        td_ := 0
+
+    // -1 stop antes de TP1 | 1,2,3 TPs alcanzados | 9 operacion viva sin TP1 todavia
+    //  8 cerrada sin llegar a TP1 ni al stop (fin de ventana) | 0 sin operacion
+    resOut_ = stp_ ? -1 : lvl_ > 0 ? lvl_ : td_ != 0 ? 9 : fired_ != 0 ? 8 : 0
+
+    [oh_, ol_, rdy_, bd_, re_, fired_, vw_, close, resOut_]
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Congelado global · a las 12:00 se para todo hasta la apertura del día siguiente
+//---------------------------------------------------------------------------------------------------------------------{
+// Se calcula aqui arriba porque lo necesita ya el dibujo del rango, que va antes que el motor de señales.
+inWinG  = not na(time(timeframe.period, entryWinSes, 'America/New_York'))
+winEndG = not inWinG and inWinG[1]
+var bool frozen    = false
+var int  freezeBar = na
+if timeframe.change('D')
+    frozen := false
+    freezeBar := na
+if winEndG
+    frozen := true
+    freezeBar := bar_index
+live   = not freezeOn or not frozen
+xRight = freezeOn and frozen and not na(freezeBar) ? freezeBar : bar_index + 1
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Calculations - Ranges (original)
+//---------------------------------------------------------------------------------------------------------------------{
+// Las lineas del rango solo crecen dentro de este horario. Fuera de el se quedan congeladas,
+// asi no se arrastran toda la noche ni ensucian la premarket del dia siguiente.
+inOrbDraw = not na(time(timeframe.period, orbDrawSes, 'America/New_York'))
+if timeframe.isintraday and inOrbDraw
+    renderRange(dayShow, dayRange, 'America/New_York', dayColor, dayTrans, dayHistory, 'Initial Balance Range', dayLineS, showIbTxt)
+    renderRange(nyShow, nyRange, 'America/New_York', nyColor, nyTrans, nyHistory, 'Opening Range', nyLineS, showNyTxt)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Calculations - VWAPs (original)
+//---------------------------------------------------------------------------------------------------------------------{
+isVoly = ta.cum(volume) > 0
+if not isVoly
+    var table note = table.new(position.bottom_right, 1, 1)
+    if barstate.islast
+        table.cell(note, 0, 0, 'No volume is provided by the data vendor.      \n\n', text_size = size.normal, text_color = chart.fg_color)
+
+nyAnchor = not na(time(timeframe.period, nyRange, 'America/New_York'))
+full_ny_session = time(timeframe.period, "0930-1600", "America/New_York")
+if vwapShow and timeframe.isintraday
+    renderVwap(isVoly, vwapSource, nyAnchor and nyAnchor != nyAnchor[1] , not na(full_ny_session) ? vwapColor : na, vwapStyle, false, 0, color(color.blue), '', vwapHistory)
+var int anchorDIndex = na, var int anchorPDIndex = na
+if nyAnchor and nyAnchor != nyAnchor[1]
+    anchorPDIndex := anchorDIndex, anchorDIndex := bar_index
+if vwapShowP and timeframe.isintraday
+    renderVwap(isVoly, vwapSource, anchorPDIndex, not na(full_ny_session) ? vwapColorP : na, vwapStyleP)
+var float highOfDay = na
+var float lowOfDay = na
+if timeframe.change('D')
+    highOfDay := high
+    lowOfDay := low
+else
+    highOfDay := math.max(high, highOfDay)
+    lowOfDay := math.min(low, lowOfDay)
+if vwapShowD and timeframe.isintraday
+    renderVwap(isVoly, vwapSourceD, timeframe.change('D'), vwapColorD, vwapStyleD, vwapBand1D, vwapMult1D, vwapBand1CD, vwapBand1SD, vwapHistoryD)
+if vwapShowDH and timeframe.isintraday
+    renderVwap(isVoly, vwapSourceDH, highOfDay == high, vwapColorDH, vwapStyleDH, vwapBand1DH, vwapMult1DH, vwapBand1CDH, vwapBand1SDH, 0)
+if vwapShowDL and timeframe.isintraday
+    renderVwap(isVoly, vwapSourceDL, lowOfDay == low, vwapColorDL, vwapStyleDL, vwapBand1DL, vwapMult1DL, vwapBand1CDL, vwapBand1SDL, 0)
+var float highOfYear = na
+if timeframe.change('12M')
+    highOfYear := high
+else
+    highOfYear := math.max(high, highOfYear)
+if vwapShowM and (timeframe.isintraday or timeframe.isdwm)
+    renderVwap(isVoly, vwapSourceM, timeframe.change('M'), vwapColorM, vwapStyleM, false, 0, color(color.yellow), '', vwapHistoryM)
+if vwapShowY and (timeframe.isintraday or timeframe.isdwm)
+    renderVwap(isVoly, vwapSourceY, timeframe.change('12M'), vwapColorY, vwapStyleY, false, 0, color(color.green), '', vwapHistoryY)
+if vwapShowH and (timeframe.isintraday or timeframe.isdwm)
+    renderVwap(isVoly, vwapSourceH, highOfYear == high, vwapColorH, vwapStyleH, false, 0, color(color.red), '', 0)
+
+// =====================================================================================================================
+//                         NIVELES DE ASIA Y LONDRES  ·  la liquidez de la madrugada
+// =====================================================================================================================
+// Arrays sueltos en paralelo, sin tipos propios: es la forma que ya usa el resto del script.
+var array<line>  sLn = array.new<line>()
+var array<label> sLb = array.new<label>()
+var array<float> sPx = array.new<float>()
+var array<bool>  sHi = array.new<bool>()
+var array<bool>  sSw = array.new<bool>()
+
+// Se llaman siempre, pase lo que pase, porque llevan var dentro.
+[asiaHi, asiaLo, asiaHiB, asiaLoB, asiaSB, asiaDone] = f_sessRange(sessAsiaTxt)
+[lonHi,  lonLo,  lonHiB,  lonLoB,  lonSB,  lonDone]  = f_sessRange(sessLonTxt)
+
+// La linea arranca en la VELA QUE HIZO EL EXTREMO. Si esa vela no se hubiera podido guardar,
+// cae hacia atras al inicio de la madrugada; nunca a la vela actual, que es lo que hacia que
+// las lineas pareciesen salir de la nada en mitad del grafico.
+f_pushLvl(float px, int xExt, int xSess, bool isHigh, string txt) =>
+    if not na(px)
+        x1 = not na(xExt) ? xExt : not na(xSess) ? xSess : bar_index
+        sLn.push(line.new(x1, px, bar_index + 1, px, color = sessColor, style = getStyle(sessStyleS), width = sessWidth))
+        sLb.push(label.new(bar_index + 1, px, sessShowTxt ? txt : '', style = label.style_none, textcolor = sessColor, size = size.tiny))
+        sPx.push(px)
+        sHi.push(isHigh)
+        sSw.push(false)
+
+if sessOn and timeframe.isintraday and live
+    if asiaDone
+        f_pushLvl(asiaHi, sessFromOpen ? asiaSB : asiaHiB, asiaSB, true,  'ASIA H')
+        f_pushLvl(asiaLo, sessFromOpen ? asiaSB : asiaLoB, asiaSB, false, 'ASIA L')
+    if lonDone
+        f_pushLvl(lonHi,  sessFromOpen ? lonSB : lonHiB,   lonSB,  true,  'LON H')
+        f_pushLvl(lonLo,  sessFromOpen ? lonSB : lonLoB,   lonSB,  false, 'LON L')
+
+    if sLn.size() > 0
+        for i = 0 to sLn.size() - 1
+            if not sSw.get(i)
+                hitLv = sHi.get(i) ? high >= sPx.get(i) : low <= sPx.get(i)
+                if hitLv and sessCut
+                    sSw.set(i, true)
+                else
+                    sLn.get(i).set_x2(bar_index + 1)
+                    sLb.get(i).set_x(bar_index + 1)
+
+    while sLn.size() > sessKeep * 4
+        sLn.shift().delete()
+        sLb.shift().delete()
+        sPx.shift()
+        sHi.shift()
+        sSw.shift()
+
+// =====================================================================================================================
+//                         FVG  ·  huecos de valor justo de M15 y H1
+// =====================================================================================================================
+// Un juego de arrays por temporalidad. Sin tipos propios, igual que arriba.
+var array<box>   aBx = array.new<box>()
+var array<float> aBt = array.new<float>()
+var array<float> aTp = array.new<float>()
+var array<bool>  aTk = array.new<bool>()
+var array<int>   aBi = array.new<int>()
+var array<box>   bBx = array.new<box>()
+var array<float> bBt = array.new<float>()
+var array<float> bTp = array.new<float>()
+var array<bool>  bTk = array.new<bool>()
+var array<int>   bBi = array.new<int>()
+
+[fBotA, fTopA, fHasA, fMidA] = request.security(syminfo.tickerid, fvgTfA, f_fvg(), lookahead = barmerge.lookahead_off)
+[fBotB, fTopB, fHasB, fMidB] = request.security(syminfo.tickerid, fvgTfB, f_fvg(), lookahead = barmerge.lookahead_off)
+
+chartSec = timeframe.in_seconds(timeframe.period)
+liveA = fvgOn and fvgOnA and timeframe.isintraday and live and chartSec <= timeframe.in_seconds(fvgTfA)
+liveB = fvgOn and fvgOnB and timeframe.isintraday and live and chartSec <= timeframe.in_seconds(fvgTfB)
+
+// Un hueco nuevo solo se acepta cuando la vela de esa temporalidad ACABA de cerrar,
+// de ahi la comparacion del tiempo de la vela del medio contra el de la barra anterior.
+freshA = fHasA and not na(fMidA) and (na(fMidA[1]) or fMidA != fMidA[1])
+freshB = fHasB and not na(fMidB) and (na(fMidB[1]) or fMidB != fMidB[1])
+sizeA  = not na(fBotA) and not na(fTopA) and fTopA - fBotA > 0 and fTopA - fBotA >= fvgMinPts
+sizeB  = not na(fBotB) and not na(fTopB) and fTopB - fBotB > 0 and fTopB - fBotB >= fvgMinPts
+newA   = liveA and freshA and sizeA
+newB   = liveB and freshB and sizeB
+txtA   = fvgShowTxt ? f_tfLabel(fvgTfA) : ''
+txtB   = fvgShowTxt ? f_tfLabel(fvgTfB) : ''
+
+// ---- temporalidad media ----
+if newA
+    aBx.push(box.new(fMidA, fTopA, time + 1, fBotA, xloc = xloc.bar_time, border_color = fvgBorder, border_width = 1, bgcolor = fvgColor, text = txtA, text_size = size.tiny, text_color = fvgTxtCol, text_halign = text.align_left, text_valign = text.align_center))
+    aBt.push(fBotA)
+    aTp.push(fTopA)
+    aTk.push(false)
+    aBi.push(bar_index)
+
+if liveA
+    if aBx.size() > 0
+        for i = 0 to aBx.size() - 1
+            if not aTk.get(i)
+                if bar_index > aBi.get(i) and high >= aBt.get(i) and low <= aTp.get(i)
+                    aTk.set(i, true)
+            if not aTk.get(i) or not fvgCut
+                aBx.get(i).set_right(time + 1)
+    while aBx.size() > fvgKeep
+        aBx.shift().delete()
+        aBt.shift()
+        aTp.shift()
+        aTk.shift()
+        aBi.shift()
+
+// ---- temporalidad alta ----
+if newB
+    bBx.push(box.new(fMidB, fTopB, time + 1, fBotB, xloc = xloc.bar_time, border_color = fvgBorder, border_width = 1, bgcolor = fvgColor, text = txtB, text_size = size.tiny, text_color = fvgTxtCol, text_halign = text.align_left, text_valign = text.align_center))
+    bBt.push(fBotB)
+    bTp.push(fTopB)
+    bTk.push(false)
+    bBi.push(bar_index)
+
+if liveB
+    if bBx.size() > 0
+        for i = 0 to bBx.size() - 1
+            if not bTk.get(i)
+                if bar_index > bBi.get(i) and high >= bBt.get(i) and low <= bTp.get(i)
+                    bTk.set(i, true)
+            if not bTk.get(i) or not fvgCut
+                bBx.get(i).set_right(time + 1)
+    while bBx.size() > fvgKeep
+        bBx.shift().delete()
+        bBt.shift()
+        bTp.shift()
+        bTk.shift()
+        bBi.shift()
+
+// =====================================================================================================================
+//                                        MOTOR DE SEÑALES · GRÁFICO ACTUAL
+// =====================================================================================================================
+nySessStart = nyAnchor and nyAnchor != nyAnchor[1]
+[nyVwap, nyVwUp, nyVwDn] = ta.vwap(vwapSource, nySessStart, 1)
+
+inOR    = not na(time(timeframe.period, nyRange, 'America/New_York'))
+orStart = inOR and not inOR[1]
+orEnd   = not inOR and inOR[1]
+inWin   = not na(time(timeframe.period, entryWinSes, 'America/New_York'))
+winEnd  = not inWin and inWin[1]
+
+var float orH     = na
+var float orL     = na
+var bool  orReady = false
+if orStart
+    orH := high
+    orL := low
+    orReady := false
+else if inOR
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+if orEnd
+    orReady := true
+
+var int   brkDir    = 0
+var float sweepExt  = na
+var bool  reentered = false
+var int   brkBar    = na
+var int   sigToday  = 0
+// El barrido del dia se guarda aparte: brkDir se borra al abrir la operacion y el panel
+// de lectura necesita seguir sabiendo por donde y hasta donde manipularon.
+var int   swDir     = 0
+var float swExt     = na
+if orStart
+    brkDir := 0
+    sweepExt := na
+    reentered := false
+    brkBar := na
+    sigToday := 0
+    swDir := 0
+    swExt := na
+
+// ① Ruptura del rango — vale mecha o cierre
+brokeUp = orReady and (brkMode == 'Cierre' ? close > orH : high > orH)
+brokeDn = orReady and (brkMode == 'Cierre' ? close < orL : low  < orL)
+
+bool brkMarkUp = false
+bool brkMarkDn = false
+
+if orReady and inWin and timeframe.isintraday
+    if brkDir == 0
+        if brokeUp
+            brkDir := 1
+            sweepExt := high
+            brkBar := bar_index
+            reentered := false
+            brkMarkUp := true
+        else if brokeDn
+            brkDir := -1
+            sweepExt := low
+            brkBar := bar_index
+            reentered := false
+            brkMarkDn := true
+    else if brkDir == 1
+        sweepExt := math.max(nz(sweepExt, high), high)
+        if not reentered and close < orH
+            reentered := true
+        if useBarLim and not reentered and bar_index - brkBar > barLim
+            brkDir := 0
+            sweepExt := na
+    else if brkDir == -1
+        sweepExt := math.min(nz(sweepExt, low), low)
+        if not reentered and close > orL
+            reentered := true
+        if useBarLim and not reentered and bar_index - brkBar > barLim
+            brkDir := 0
+            sweepExt := na
+
+if brkDir != 0
+    swDir := brkDir
+    swExt := sweepExt
+
+// --- Bias del gráfico actual ------------------------------------------------------------------------------------------
+f_biasSym(simple string sym, simple string tf, simple int len) =>
+    [c, e] = request.security(sym, tf, [close, ta.ema(close, len)], lookahead = barmerge.lookahead_off)
+    na(c) or na(e) ? 0 : c > e ? 1 : c < e ? -1 : 0
+
+chartBiasHigh = f_biasSym(syminfo.tickerid, biasTfHigh, biasMaLen)
+chartBiasMid  = f_biasSym(syminfo.tickerid, biasTfMid,  biasMaLen)
+biasOkLong  = not useBiasFilt or (biasFiltMode == 'Solo temporalidad alta' ? chartBiasHigh >= 0 : biasFiltMode == 'Solo temporalidad media' ? chartBiasMid >= 0 : chartBiasHigh >= 0 and chartBiasMid >= 0)
+biasOkShort = not useBiasFilt or (biasFiltMode == 'Solo temporalidad alta' ? chartBiasHigh <= 0 : biasFiltMode == 'Solo temporalidad media' ? chartBiasMid <= 0 : chartBiasHigh <= 0 and chartBiasMid <= 0)
+
+// --- Operación activa --------------------------------------------------------------------------------------------------
+var int   tradeDir  = 0
+var float entryPx   = na
+var float slPx      = na
+var float tp1Px     = na
+var float tp2Px     = na
+var float tp3Px     = na
+var float riskPts   = na
+var bool  tp1Hit    = false
+var bool  tp2Hit    = false
+var bool  tp3Hit    = false
+var int   entryBar  = na
+
+var line lnE = na, var line lnS = na, var line lnT1 = na, var line lnT2 = na, var line lnT3 = na
+var box  bxRisk = na, var box bxRew = na
+var array<line>  histLines  = array.new<line>()
+var array<label> histLabels = array.new<label>()
+var array<box>   histBoxes  = array.new<box>()
+var array<line>  orLines    = array.new<line>()
+
+atrVal = ta.atr(atrLen)
+buf    = slBufTicks * syminfo.mintick
+
+// ② Cierre cruzando el VWAP de NY (NO vale mecha)
+crossUp = ta.crossover(close, nyVwap)
+crossDn = ta.crossunder(close, nyVwap)
+
+setupLong  = sigOn and timeframe.isintraday and orReady and inWin and not na(nyVwap) and brkDir == -1 and (not needReentry or reentered) and crossUp
+setupShort = sigOn and timeframe.isintraday and orReady and inWin and not na(nyVwap) and brkDir ==  1 and (not needReentry or reentered) and crossDn
+
+slLongCand  = slMode == 'Extremo de la manipulación'    ? nz(sweepExt, low)  - buf :
+              slMode == 'Extremo del rango 09:30-09:45' ? orL - buf :
+              slMode == 'ATR'                            ? close - atrVal * atrMult : close - fixedSlPts
+slShortCand = slMode == 'Extremo de la manipulación'    ? nz(sweepExt, high) + buf :
+              slMode == 'Extremo del rango 09:30-09:45' ? orH + buf :
+              slMode == 'ATR'                            ? close + atrVal * atrMult : close + fixedSlPts
+
+rLongCand  = close - slLongCand
+rShortCand = slShortCand - close
+okLongSize  = f_sizeOk(rLongCand,  orH, orL)
+okShortSize = f_sizeOk(rShortCand, orH, orL)
+
+// --- Filtro de alineación con el VWAP del día ---------------------------------------------------------------------------
+// El VWAP negro, el que arranca a las 18:00. Marca la direccion del dia sin depender de ninguna media.
+[dayVwap, dayVwUp, dayVwDn] = ta.vwap(vwapSourceD, timeframe.change('D'), 1)
+// 1 dia alcista · -1 dia bajista · 0 el precio esta pegado al VWAP y el dia no dice nada
+dayDir = na(dayVwap) or na(orH) or na(orL) or orH <= orL ? 0 : close > dayVwap + (orH - orL) * alignDead ? 1 : close < dayVwap - (orH - orL) * alignDead ? -1 : 0
+alignOkLong  = not alignOn or dayDir >= 0
+alignOkShort = not alignOn or dayDir <= 0
+
+canFire  = sigToday < maxSigs and (not oneAtTime or tradeDir == 0)
+longSig  = setupLong  and canFire and okLongSize  and biasOkLong  and alignOkLong
+shortSig = setupShort and canFire and okShortSize and biasOkShort and alignOkShort
+
+// Señales que existian y el filtro se ha llevado por delante. Solo para auditar el historico.
+blkLong  = setupLong  and canFire and okLongSize  and biasOkLong  and not alignOkLong
+blkShort = setupShort and canFire and okShortSize and biasOkShort and not alignOkShort
+
+// --- MODO CONTINUACIÓN ---------------------------------------------------------------------------------------------------
+// El rango se rompe, el precio regresa y va a buscar el VWAP de NY. Si falla ahi y cierra cruzandolo
+// a favor del dia, se entra en ese sentido. El stop va al extremo del tramo que estuvo al otro lado
+// del VWAP, que es la estructura que se acaba de romper.
+above = not na(nyVwap) and close > nyVwap
+below = not na(nyVwap) and close < nyVwap
+var float legHi = na
+var float legLo = na
+if above and not above[1]
+    legHi := high
+else if above
+    legHi := math.max(nz(legHi, high), high)
+if below and not below[1]
+    legLo := low
+else if below
+    legLo := math.min(nz(legLo, low), low)
+
+contBase = sigOn and timeframe.isintraday and orReady and inWin and not na(nyVwap) and alignOn and contOn and (not needReentry or reentered)
+// Se dispara justo donde el fade quedaba bloqueado: rompio abajo en dia bajista, o rompio arriba en dia alcista.
+setupContShort = contBase and dayDir == -1 and brkDir == -1 and crossDn
+setupContLong  = contBase and dayDir ==  1 and brkDir ==  1 and crossUp
+
+slContShort = slMode == 'ATR' ? close + atrVal * atrMult : slMode == 'Puntos fijos' ? close + fixedSlPts : math.max(nz(legHi, high), high) + buf
+slContLong  = slMode == 'ATR' ? close - atrVal * atrMult : slMode == 'Puntos fijos' ? close - fixedSlPts : math.min(nz(legLo, low),  low)  - buf
+
+contShortSig = setupContShort and canFire and f_sizeOk(slContShort - close, orH, orL)
+contLongSig  = setupContLong  and canFire and f_sizeOk(close - slContLong,  orH, orL)
+
+newTrade = longSig or shortSig or contLongSig or contShortSig
+isLongTr = longSig or contLongSig
+isCont   = contLongSig or contShortSig
+
+if newTrade
+    tradeDir := isLongTr ? 1 : -1
+    entryPx  := close
+    slPx     := longSig ? slLongCand : shortSig ? slShortCand : contLongSig ? slContLong : slContShort
+    riskPts  := math.abs(entryPx - slPx)
+    tp1Px    := isLongTr ? entryPx + riskPts * tp1R : entryPx - riskPts * tp1R
+    tp2Px    := isLongTr ? entryPx + riskPts * tp2R : entryPx - riskPts * tp2R
+    tp3Px    := isLongTr ? entryPx + riskPts * tp3R : entryPx - riskPts * tp3R
+    tp1Hit   := false
+    tp2Hit   := false
+    tp3Hit   := false
+    entryBar := bar_index
+    sigToday += 1
+    brkDir    := 0
+    reentered := false
+    sweepExt  := na
+
+    lnE  := line.new(bar_index, entryPx, bar_index + 1, entryPx, color = colEntryLn, style = line.style_solid,  width = 2)
+    lnS  := line.new(bar_index, slPx,    bar_index + 1, slPx,    color = colSl,      style = line.style_solid,  width = 2)
+    lnT1 := line.new(bar_index, tp1Px,   bar_index + 1, tp1Px,   color = colTp,      style = line.style_dashed, width = 1)
+    lnT2 := line.new(bar_index, tp2Px,   bar_index + 1, tp2Px,   color = colTp,      style = line.style_dashed, width = 1)
+    lnT3 := line.new(bar_index, tp3Px,   bar_index + 1, tp3Px,   color = colTp,      style = line.style_dashed, width = 1)
+    histLines.push(lnE), histLines.push(lnS), histLines.push(lnT1), histLines.push(lnT2), histLines.push(lnT3)
+    while histLines.size() > keepTrades * 5
+        histLines.shift().delete()
+
+    if showZones
+        bxRisk := box.new(bar_index, math.max(entryPx, slPx),  bar_index + 1, math.min(entryPx, slPx),  border_color = color(na), bgcolor = color.new(colSl, 90))
+        bxRew  := box.new(bar_index, math.max(entryPx, tp3Px), bar_index + 1, math.min(entryPx, tp3Px), border_color = color(na), bgcolor = color.new(colTp, 93))
+        histBoxes.push(bxRisk), histBoxes.push(bxRew)
+        while histBoxes.size() > keepTrades * 2
+            histBoxes.shift().delete()
+
+    if showLabels
+        ptv     = instrPreset == 'MNQ ($2 / pt)' ? 2.0 : instrPreset == 'MES ($5 / pt)' ? 5.0 : instrPreset == 'MYM ($0.50 / pt)' ? 0.5 : customPtVal
+        riskUsd = riskPts * ptv * contracts
+        lbCol   = entSameCol ? colEntryBar : (tradeDir == 1 ? colEntryUp : colEntryDn)
+        txt     = (tradeDir == 1 ? '▲ LARGO' : '▼ CORTO') + '\nEnt ' + f_px(entryPx) + '\nSL ' + f_px(slPx) + '  (' + str.tostring(riskPts, '#.##') + ' pts · $' + str.tostring(riskUsd, '#.##') + ')' + '\nTP1 ' + f_px(tp1Px) + '   TP2 ' + f_px(tp2Px) + '   TP3 ' + f_px(tp3Px)
+        lb = label.new(bar_index, tradeDir == 1 ? low : high, txt, style = tradeDir == 1 ? label.style_label_up : label.style_label_down, color = color.new(lbCol, 12), textcolor = color.white, size = size.small)
+        histLabels.push(lb)
+        while histLabels.size() > keepTrades
+            histLabels.shift().delete()
+
+    alert((tradeDir == 1 ? 'CH033 ORB+ LARGO ' : 'CH033 ORB+ CORTO ') + (isCont ? '(continuación) ' : '') + syminfo.ticker + ' | Entrada ' + f_px(entryPx) + ' | SL ' + f_px(slPx) + ' | TP1 ' + f_px(tp1Px) + ' | TP2 ' + f_px(tp2Px) + ' | TP3 ' + f_px(tp3Px), alert.freq_once_per_bar_close)
+
+// --- Seguimiento -------------------------------------------------------------------------------------------------------
+bool hitSl  = false
+bool hitTp1 = false
+bool hitTp2 = false
+bool hitTp3 = false
+
+if tradeDir != 0 and not newTrade
+    if tradeDir == 1
+        if not tp1Hit and high >= tp1Px
+            tp1Hit := true
+            hitTp1 := true
+            if beAfterTp1
+                slPx := entryPx
+                if not na(lnE)
+                    lnE.set_color(colSl)
+                    lnE.set_width(2)
+                    lnS.set_style(line.style_dotted)
+                    lnS.set_color(color.new(colSl, 55))
+        if not tp2Hit and high >= tp2Px
+            tp2Hit := true
+            hitTp2 := true
+        if high >= tp3Px
+            tp3Hit := true
+            hitTp3 := true
+        if low <= slPx
+            hitSl := true
+    else
+        if not tp1Hit and low <= tp1Px
+            tp1Hit := true
+            hitTp1 := true
+            if beAfterTp1
+                slPx := entryPx
+                if not na(lnE)
+                    lnE.set_color(colSl)
+                    lnE.set_width(2)
+                    lnS.set_style(line.style_dotted)
+                    lnS.set_color(color.new(colSl, 55))
+        if not tp2Hit and low <= tp2Px
+            tp2Hit := true
+            hitTp2 := true
+        if low <= tp3Px
+            tp3Hit := true
+            hitTp3 := true
+        if high >= slPx
+            hitSl := true
+
+    if not na(lnE)
+        lnE.set_x2(bar_index + 1)
+        lnS.set_x2(bar_index + 1)
+        lnT1.set_x2(bar_index + 1)
+        lnT2.set_x2(bar_index + 1)
+        lnT3.set_x2(bar_index + 1)
+    if showZones and not na(bxRisk)
+        bxRisk.set_right(bar_index + 1)
+        bxRew.set_right(bar_index + 1)
+
+    if hitTp1
+        alert('CH033 ORB+ TP1 alcanzado ' + syminfo.ticker + ' @ ' + f_px(tp1Px), alert.freq_once_per_bar)
+    if hitTp2
+        alert('CH033 ORB+ TP2 alcanzado ' + syminfo.ticker + ' @ ' + f_px(tp2Px), alert.freq_once_per_bar)
+    if hitTp3
+        alert('CH033 ORB+ TP3 alcanzado · operación cerrada ' + syminfo.ticker + ' @ ' + f_px(tp3Px), alert.freq_once_per_bar)
+    if hitSl
+        alert((slPx == entryPx ? 'CH033 ORB+ Salida en break-even ' : 'CH033 ORB+ STOP LOSS ') + syminfo.ticker + ' @ ' + f_px(slPx), alert.freq_once_per_bar)
+
+    if hitTp3 or hitSl
+        tradeDir := 0
+
+if closeAtEnd and winEnd and tradeDir != 0
+    alert('CH033 ORB+ Cierre por fin de ventana horaria ' + syminfo.ticker + ' @ ' + f_px(close), alert.freq_once_per_bar)
+    tradeDir := 0
+
+// --- Líneas del rango extendidas ----------------------------------------------------------------------------------------
+if showOrLv and timeframe.isintraday and orEnd
+    lh = line.new(bar_index, orH, bar_index + 1, orH, color = #1565c0, style = line.style_solid, width = 1)
+    ll = line.new(bar_index, orL, bar_index + 1, orL, color = #1565c0, style = line.style_solid, width = 1)
+    orLines.push(lh), orLines.push(ll)
+    while orLines.size() > keepTrades * 2
+        orLines.shift().delete()
+if showOrLv and orReady and inWin and orLines.size() >= 2
+    orLines.get(orLines.size() - 2).set_x2(bar_index + 1)
+    orLines.get(orLines.size() - 1).set_x2(bar_index + 1)
+
+// =====================================================================================================================
+//              PERFIL DE VOLUMEN  ·  heatmap del volumen YA EJECUTADO, repartido por niveles de precio
+// =====================================================================================================================
+// Que quede claro lo que es y lo que no: un heatmap de Bookmap pinta ordenes EN REPOSO, lo que la gente dice
+// que quiere hacer, y por eso se puede falsear con spoofing. Pine no recibe el libro de ordenes, asi que eso
+// no se puede hacer aqui ni en ningun indicador de TradingView. Lo que si se puede es esto: pedir las velas de
+// una temporalidad inferior, repartir su volumen por niveles de precio y pintar el resultado. Son operaciones
+// ya cerradas, dinero que cambio de manos. No se puede falsear.
+[ltfH, ltfL, ltfV] = request.security_lower_tf(syminfo.tickerid, vpLtf, [high, low, volume])
+
+var array<float> vpAh  = array.new<float>()
+var array<float> vpAl  = array.new<float>()
+var array<float> vpAv  = array.new<float>()
+var array<box>   vpBx  = array.new<box>()
+var array<float> vpBk  = array.new<float>()
+var int   vpStart = na
+var float vpPoc   = na
+var float vpStep  = na
+var float vpPlo   = na    // precio del nivel mas bajo del perfil
+var float vpMx    = na    // volumen del nivel mas cargado
+var float vpVah   = na    // borde alto del area de valor
+var float vpVal   = na    // borde bajo del area de valor
+var line  vpVahLn = na
+var line  vpValLn = na
+var line  vpPocLn = na
+var label vpPocLb = na
+
+vpReset = vpAnchor == 'Sesión de NY' ? nySessStart : timeframe.change('D')
+
+if vpOn and timeframe.isintraday and live
+    if vpReset or na(vpStart)
+        vpAh.clear()
+        vpAl.clear()
+        vpAv.clear()
+        vpStart := bar_index
+    if ltfV.size() > 0
+        for i = 0 to ltfV.size() - 1
+            if ltfV.get(i) > 0 and not na(ltfH.get(i)) and not na(ltfL.get(i))
+                vpAh.push(ltfH.get(i))
+                vpAl.push(ltfL.get(i))
+                vpAv.push(ltfV.get(i))
+    // Tope de seguridad: una sesion de NY en velas de 1 minuto son 390 muestras.
+    while vpAh.size() > 5000
+        vpAh.shift()
+        vpAl.shift()
+        vpAv.shift()
+
+// El perfil se reconstruye entero en la ultima vela: es la unica forma de repartir por niveles
+// cuando el rango de la sesion todavia puede crecer.
+if vpOn and timeframe.isintraday and barstate.islast and vpAh.size() > 2
+    float pHi = vpAh.max()
+    float pLo = vpAl.min()
+    if pHi > pLo
+        vpStep := (pHi - pLo) / vpRows
+        vpBk.clear()
+        for r = 0 to vpRows - 1
+            vpBk.push(0.0)
+        // Cada vela interna reparte su volumen entre todos los niveles que toca.
+        for i = 0 to vpAh.size() - 1
+            i0 = math.max(0, math.min(vpRows - 1, int((vpAl.get(i) - pLo) / vpStep)))
+            i1 = math.max(0, math.min(vpRows - 1, int((vpAh.get(i) - pLo) / vpStep)))
+            share = vpAv.get(i) / (i1 - i0 + 1)
+            for r = i0 to i1
+                vpBk.set(r, vpBk.get(r) + share)
+        float mx = vpBk.max()
+        int   pocIx = vpBk.indexof(mx)
+        vpPoc := pLo + vpStep * (pocIx + 0.5)
+        vpPlo := pLo
+        vpMx  := mx
+
+        // Area de valor: se parte del POC y se va sumando el vecino mas cargado de los dos
+        // hasta cubrir el porcentaje pedido del volumen total. Es el metodo clasico.
+        float tot = vpBk.sum()
+        float acc = vpBk.get(pocIx)
+        int   iLo = pocIx
+        int   iHi = pocIx
+        while acc < tot * vpVaPct / 100 and (iLo > 0 or iHi < vpRows - 1)
+            float vDn = iLo > 0 ? vpBk.get(iLo - 1) : -1.0
+            float vUp = iHi < vpRows - 1 ? vpBk.get(iHi + 1) : -1.0
+            if vUp >= vDn
+                iHi += 1
+                acc += vUp
+            else
+                iLo -= 1
+                acc += vDn
+        vpVal := pLo + vpStep * iLo
+        vpVah := pLo + vpStep * (iHi + 1)
+
+        while vpBx.size() < vpRows
+            vpBx.push(box.new(bar_index, close, bar_index, close, border_color = color(na), bgcolor = color(na)))
+        // Si bajas el numero de niveles, las cajas sobrantes se borran en vez de quedarse colgadas.
+        while vpBx.size() > vpRows
+            vpBx.pop().delete()
+        // En modo barras el perfil se dibuja en el hueco a la derecha de la ultima vela, para no tapar el precio.
+        int xR = bar_index + 3
+        for r = 0 to vpRows - 1
+            b     = vpBx.get(r)
+            ratio = mx > 0 ? vpBk.get(r) / mx : 0.0
+            pct   = ratio * 100
+            // La barra del POC lleva su propio color: es el nivel que hay que localizar de un vistazo.
+            col   = r == pocIx ? vpPocBar : vpNodes and pct >= vpHvnPct ? vpHvnCol : vpNodes and pct <= vpLvnPct ? vpLvnCol : vpColBase
+            if vpMode == 'Barras a la derecha'
+                // Un hueco entre nivel y nivel: sin el hueco todo se funde en un bloque de color.
+                gap = vpStep * 0.22
+                b.set_top(pLo + vpStep * (r + 1) - gap)
+                b.set_bottom(pLo + vpStep * r + gap)
+                b.set_left(xR)
+                b.set_right(xR + math.max(1, int(vpWidth * ratio)))
+                b.set_bgcolor(color.new(col, vpBarTr))
+                b.set_border_color(color(na))
+            else
+                b.set_top(pLo + vpStep * (r + 1))
+                b.set_bottom(pLo + vpStep * r)
+                b.set_left(nz(vpStart, bar_index))
+                b.set_right(xRight)
+                b.set_bgcolor(color.new(col, int(vpMaxTr - (vpMaxTr - vpMinTr) * ratio)))
+                b.set_border_color(color(na))
+
+        if vpVaOn
+            if na(vpVahLn)
+                vpVahLn := line.new(nz(vpStart, bar_index), vpVah, bar_index + 1, vpVah, color = vpVaCol, style = line.style_dotted, width = 1)
+                vpValLn := line.new(nz(vpStart, bar_index), vpVal, bar_index + 1, vpVal, color = vpVaCol, style = line.style_dotted, width = 1)
+            vpVahLn.set_xy1(nz(vpStart, bar_index), vpVah)
+            vpVahLn.set_xy2(xRight, vpVah)
+            vpValLn.set_xy1(nz(vpStart, bar_index), vpVal)
+            vpValLn.set_xy2(xRight, vpVal)
+
+        if vpPocOn
+            // Por defecto la linea del POC vive pegada al perfil. Cruzando toda la sesion se confunde
+            // con las lineas del rango de apertura, porque las dos arrancan en las 09:30.
+            pocX1 = vpPocSpan == 'Toda la sesión' ? nz(vpStart, bar_index) : xR
+            pocX2 = vpPocSpan == 'Toda la sesión' ? xRight : xR + vpWidth
+            if na(vpPocLn)
+                vpPocLn := line.new(pocX1, vpPoc, pocX2, vpPoc, color = vpPocCol, style = line.style_dashed, width = 1)
+                // style_label_left: el texto sale hacia la DERECHA del punto, asi no se monta sobre las barras.
+                vpPocLb := label.new(bar_index + 1, vpPoc, '', style = label.style_label_left, color = color(na), textcolor = vpPocCol, size = size.tiny)
+            vpPocLn.set_xy1(pocX1, vpPoc)
+            vpPocLn.set_xy2(pocX2, vpPoc)
+            // Si hay una operacion viva, avisa de si el objetivo tiene un HVN por delante.
+            // Un solo aviso: si hay atasco en el camino manda eso, que es lo que te hace cerrar antes.
+            string warn = ''
+            if vpTpChk and tradeDir != 0 and not na(tp2Px)
+                iA = math.max(0, math.min(vpRows - 1, int((math.min(close, tp2Px) - pLo) / vpStep)))
+                iB = math.max(0, math.min(vpRows - 1, int((math.max(close, tp2Px) - pLo) / vpStep)))
+                bool block = false
+                for r = iA to iB
+                    if mx > 0 and vpBk.get(r) / mx * 100 >= vpHvnPct
+                        block := true
+                ix2 = math.max(0, math.min(vpRows - 1, int((tp2Px - pLo) / vpStep)))
+                warn := block ? '  · TP2 con HVN delante' : mx > 0 and vpBk.get(ix2) / mx * 100 <= vpLvnPct ? '  · TP2 en LVN' : ''
+            vpPocLb.set_xy(vpMode == 'Barras a la derecha' ? xR + vpWidth + 2 : bar_index + 1, vpPoc)
+            vpPocLb.set_text('POC ' + f_px(vpPoc) + warn)
+
+
+// =====================================================================================================================
+//                                        MARCAS EN LAS VELAS
+// =====================================================================================================================
+markUpBar   = markBreak and brkMarkUp
+markDnBar   = markBreak and brkMarkDn
+// Se colorea la vela de la ENTRADA REAL, no la del setup: si un filtro descarta la señal, no se pinta nada.
+markEntLong = markEntry and (longSig or contLongSig)
+markEntShrt = markEntry and (shortSig or contShortSig)
+
+colBrkUse = brkSameCol ? colBreakBar : (brkMarkUp ? colBreakUp : colBreakDn)
+colEntUse = isCont ? (isLongTr ? colContUp : colContDn) : entSameCol ? colEntryBar : (longSig ? colEntryUp : colEntryDn)
+
+barColorFinal = markEntLong or markEntShrt ? colEntUse : markUpBar or markDnBar ? colBrkUse : color(na)
+barcolor(barColorFinal, title = 'Marca de vela')
+
+plotshape(markBrkShape and markUpBar,   'ORB · Ruptura del rango ↑', shape.labeldown, location.abovebar, color = brkSameCol ? colBreakBar : colBreakUp, text = 'ORB', textcolor = color.white, size = size.tiny)
+plotshape(markBrkShape and markDnBar,   'ORB · Ruptura del rango ↓', shape.labelup,   location.belowbar, color = brkSameCol ? colBreakBar : colBreakDn, text = 'ORB', textcolor = color.white, size = size.tiny)
+plotshape(markEntShape and markEntry and longSig,  '▲ Entrada LARGO',  shape.triangleup,  location.belowbar, color = entSameCol ? colEntryBar : colEntryUp, size = size.small)
+plotshape(markEntShape and markEntry and shortSig, '▼ Entrada CORTO',  shape.triangledown,location.abovebar, color = entSameCol ? colEntryBar : colEntryDn, size = size.small)
+plotshape(markEntShape and markEntry and contLongSig,  '▲ Entrada LARGO · continuación',  shape.triangleup,  location.belowbar, color = colContUp, size = size.small)
+plotshape(markEntShape and markEntry and contShortSig, '▼ Entrada CORTO · continuación',  shape.triangledown,location.abovebar, color = colContDn, size = size.small)
+plotshape(alignMark and alignOn and blkLong,  'Largo descartado por el VWAP del día', shape.xcross, location.belowbar, color = #90a4ae, size = size.tiny)
+plotshape(alignMark and alignOn and blkShort, 'Corto descartado por el VWAP del día', shape.xcross, location.abovebar, color = #90a4ae, size = size.tiny)
+
+// --- Alertas -------------------------------------------------------------------------------------------------------------
+alertcondition(brkMarkUp,  'CH033 ORB+ ① Ruptura del rango ↑', 'CH033 ORB+ ①: el precio rompió el MÁXIMO del rango 09:30-09:45. Vigilar el reingreso.')
+alertcondition(brkMarkDn,  'CH033 ORB+ ① Ruptura del rango ↓', 'CH033 ORB+ ①: el precio rompió el MÍNIMO del rango 09:30-09:45. Vigilar el reingreso.')
+alertcondition(setupLong,  'CH033 ORB+ ② Señal LARGO',  'CH033 ORB+ ②: reingreso al rango y cierre POR ENCIMA del VWAP de NY. Señal LARGA.')
+alertcondition(setupShort, 'CH033 ORB+ ② Señal CORTO',  'CH033 ORB+ ②: reingreso al rango y cierre POR DEBAJO del VWAP de NY. Señal CORTA.')
+alertcondition(contLongSig,  'CH033 PRO · Continuación LARGO', 'CH033 PRO: día alcista, el precio falló bajo el VWAP de NY y cerró cruzándolo hacia arriba. LARGO a favor del día.')
+alertcondition(contShortSig, 'CH033 PRO · Continuación CORTO', 'CH033 PRO: día bajista, el precio falló sobre el VWAP de NY y cerró cruzándolo hacia abajo. CORTO a favor del día.')
+
+// =====================================================================================================================
+//                                        MULTI-ACTIVO
+// =====================================================================================================================
+[oh1, ol1, rdy1, bd1, re1, fi1, vw1, px1, rs1] = request.security(sym1, timeframe.period, f_setupState(), lookahead = barmerge.lookahead_off)
+[oh2, ol2, rdy2, bd2, re2, fi2, vw2, px2, rs2] = request.security(sym2, timeframe.period, f_setupState(), lookahead = barmerge.lookahead_off)
+[oh3, ol3, rdy3, bd3, re3, fi3, vw3, px3, rs3] = request.security(sym3, timeframe.period, f_setupState(), lookahead = barmerge.lookahead_off)
+
+bH1 = f_biasSym(sym1, biasTfHigh, biasMaLen)
+bM1 = f_biasSym(sym1, biasTfMid,  biasMaLen)
+bH2 = f_biasSym(sym2, biasTfHigh, biasMaLen)
+bM2 = f_biasSym(sym2, biasTfMid,  biasMaLen)
+bH3 = f_biasSym(sym3, biasTfHigh, biasMaLen)
+bM3 = f_biasSym(sym3, biasTfMid,  biasMaLen)
+
+bV1 = na(vw1) or na(px1) ? 0 : px1 > vw1 ? 1 : px1 < vw1 ? -1 : 0
+bV2 = na(vw2) or na(px2) ? 0 : px2 > vw2 ? 1 : px2 < vw2 ? -1 : 0
+bV3 = na(vw3) or na(px3) ? 0 : px3 > vw3 ? 1 : px3 < vw3 ? -1 : 0
+
+// --- Alertas de los 3 activos desde un solo grafico ---------------------------------------------------------------------
+f_alertSym(nm, rdy, bd, fi, oh, ol) =>
+    brkNow = rdy and bd != 0 and bd[1] == 0
+    sigNow = fi != 0 and fi[1] == 0
+    if multiAlerts and brkNow
+        alert('CH033 ORB+ · ' + nm + ' ROMPIO EL RANGO ' + (bd == 1 ? 'hacia ARRIBA -> buscar SHORT' : 'hacia ABAJO -> buscar LONG') + '  |  rango ' + str.tostring(oh - ol, '#.##') + ' pts', alert.freq_once_per_bar)
+    if multiAlerts and sigNow
+        alert('CH033 ORB+ · ' + nm + ' ENTRADA ' + (fi > 0 ? 'LONG' : 'SHORT') + (math.abs(fi) == 2 ? ' (continuación, a favor del día)' : '') + ' - cerro cruzando el VWAP de NY', alert.freq_once_per_bar_close)
+
+f_alertSym(nm1, rdy1, bd1, fi1, oh1, ol1)
+f_alertSym(nm2, rdy2, bd2, fi2, oh2, ol2)
+f_alertSym(nm3, rdy3, bd3, fi3, oh3, ol3)
+
+// =====================================================================================================================
+//                                        PANELES
+// =====================================================================================================================
+var table tTrend = table.new(f_pos(trendPos), 4, 4, border_width = 1, frame_width = 1, frame_color = color.new(#607d8b, 40), border_color = color.new(#607d8b, 60))
+var table tSetup = table.new(f_pos(setupPos), 5, 4, border_width = 1, frame_width = 1, frame_color = color.new(#607d8b, 40), border_color = color.new(#607d8b, 60))
+f_rowTrend(t, r, nm, bh, bm, bv, sz) =>
+    table.cell(t, 0, r, nm, text_size = sz, text_color = panelTx, bgcolor = panelBg)
+    table.cell(t, 1, r, f_biasArw(bh), text_size = sz, text_color = color.white, bgcolor = color.new(f_biasCol(bh), 15))
+    table.cell(t, 2, r, f_biasArw(bm), text_size = sz, text_color = color.white, bgcolor = color.new(f_biasCol(bm), 15))
+    table.cell(t, 3, r, f_biasArw(bv), text_size = sz, text_color = color.white, bgcolor = color.new(f_biasCol(bv), 15))
+
+f_rowSetup(t, r, nm, rdy, bd, fi, oh, ol, rs, sz) =>
+    orbTxt = rdy and bd != 0 ? '✔' : '/'
+    orbCol = rdy and bd != 0 ? #2e7d32 : #90a4ae
+    // La "c" marca que fue una entrada de continuación, no un fade.
+    vwTxt  = fi == 1 ? '✔ LONG' : fi == 2 ? '✔ LONG c' : fi == -1 ? '✔ SHORT' : fi == -2 ? '✔ SHORT c' : '/'
+    vwCol  = fi > 0 ? #2e7d32 : fi < 0 ? #c62828 : #90a4ae
+    // rs:  1 TP1 · 2 TP2 · 3 TP3 | -1 stop antes de TP1 | 9 viva | 8 cerrada sin TP1 ni stop | 0 sin operacion
+    resTxt = rs == 1 ? '✔' : rs == 2 ? '✔✔' : rs == 3 ? '✔✔✔' : rs == -1 ? '✕' : rs == 9 ? '…' : rs == 8 ? '=' : '/'
+    resCol = rs >= 1 and rs <= 3 ? #2e7d32 : rs == -1 ? #c62828 : rs == 9 ? #1565c0 : #90a4ae
+    rngTxt = na(oh) or na(ol) ? '/' : str.tostring(oh - ol, '#.##')
+    table.cell(t, 0, r, nm,     text_size = sz, text_color = panelTx, bgcolor = panelBg)
+    table.cell(t, 1, r, orbTxt, text_size = sz, text_color = color.white, bgcolor = color.new(orbCol, 15))
+    table.cell(t, 2, r, vwTxt,  text_size = sz, text_color = color.white, bgcolor = color.new(vwCol, 15))
+    table.cell(t, 3, r, resTxt, text_size = sz, text_color = color.white, bgcolor = color.new(resCol, 15))
+    table.cell(t, 4, r, rngTxt, text_size = sz, text_color = panelTx, bgcolor = panelBg)
+
+if barstate.islast
+    // ---- Panel TENDENCIA ----
+    if showTrend
+        sz = f_size(trendSize)
+        table.cell(tTrend, 0, 0, 'TEND', text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tTrend, 1, 0, f_tfLabel(biasTfHigh), text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tTrend, 2, 0, f_tfLabel(biasTfMid),  text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tTrend, 3, 0, 'VWAP', text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        f_rowTrend(tTrend, 1, nm1, bH1, bM1, bV1, sz)
+        f_rowTrend(tTrend, 2, nm2, bH2, bM2, bV2, sz)
+        f_rowTrend(tTrend, 3, nm3, bH3, bM3, bV3, sz)
+
+    // ---- Panel SETUP (3 activos) ----
+    if showSetup
+        sz = f_size(setupSize)
+        table.cell(tSetup, 0, 0, 'CH033',  text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tSetup, 1, 0, 'ORB',    text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tSetup, 2, 0, 'VWAP',   text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tSetup, 3, 0, 'Result', text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tSetup, 4, 0, 'Rango',  text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        f_rowSetup(tSetup, 1, nm1, rdy1, bd1, fi1, oh1, ol1, rs1, sz)
+        f_rowSetup(tSetup, 2, nm2, rdy2, bd2, fi2, oh2, ol2, rs2, sz)
+        f_rowSetup(tSetup, 3, nm3, rdy3, bd3, fi3, oh3, ol3, rs3, sz)
+
+
+
+
+//---------------------------------------------------------------------------------------------------------------------}

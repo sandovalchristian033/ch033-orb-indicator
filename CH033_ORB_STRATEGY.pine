@@ -1,0 +1,415 @@
+//@version=6
+// =====================================================================================================================
+//  CH033 ORB+ STRATEGY  ·  versión de backtest del CH033 ORB+ PRO
+//
+//  ESTO NO ES EL INDICADOR. Es el mismo motor de señales, sin nada de lo visual, convertido en estrategia
+//  para poder medirlo con números: cuántas operaciones, qué % de acierto, qué factor de beneficio y, sobre
+//  todo, qué pasa cuando enciendes y apagas el filtro de alineación y el modo continuación.
+//
+//  LO QUE SE HA QUITADO respecto al PRO, porque no participa en ninguna decisión de entrada:
+//    perfil de volumen, FVG, niveles de Asia y Londres, paneles multi-activo, VWAPs decorativos.
+//  Quitarlos no cambia ni una señal y hace que el backtest corra mucho más rápido.
+//
+//  CÓMO USARLO
+//    1) Ponlo en el mismo gráfico y temporalidad en la que operas (2 minutos).
+//    2) En la pestaña Propiedades de la estrategia, ajusta COMISIÓN y SLIPPAGE a los de tu bróker.
+//       Sin eso el resultado sale inflado y no sirve para nada.
+//    3) Corre primero todo apagado (como operabas antes), apunta los números, y luego enciende el filtro
+//       de alineación. Compara. Después enciende también el modo continuación y vuelve a comparar.
+//
+//  LO QUE UN BACKTEST NO PUEDE SABER
+//    Dentro de una vela de 2 minutos no hay forma de saber si primero se tocó el stop o primero el TP.
+//    TradingView asume un orden y puede equivocarse. Con plan Premium, activa el Bar Magnifier en
+//    Propiedades para que use datos de temporalidad inferior y los rellenos sean mucho más fiables.
+// =====================================================================================================================
+strategy('CH033 ORB+ STRATEGY', 'CH033 BT', overlay = true, initial_capital = 5000, default_qty_type = strategy.fixed, default_qty_value = 3, process_orders_on_close = true, calc_on_every_tick = false, max_bars_back = 5000)
+
+display = display.all - display.status_line
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Ajustes
+//---------------------------------------------------------------------------------------------------------------------{
+gSes = '🕐 HORARIOS'
+nyRange     = input.session('0930-0945', 'Rango de apertura', group = gSes, display = display)
+entryWinSes = input.session('0945-1200', 'Ventana de entradas', group = gSes, display = display)
+closeAtEnd  = input.bool(true, 'Cerrar la posición al terminar la ventana', group = gSes)
+
+gSig = '⚡ SEÑALES'
+brkMode     = input.string('Mecha (barrido)', 'Ruptura del rango por', options = ['Mecha (barrido)', 'Cierre'], group = gSig, display = display)
+needReentry = input.bool(true, 'Exigir reingreso al rango', group = gSig)
+useBarLim   = input.bool(false, 'Invalidar si tarda más de N velas en reingresar', inline = 'RL', group = gSig)
+barLim      = input.int(40, '', minval = 2, inline = 'RL', group = gSig, display = display)
+maxSigs     = input.int(1, 'Máximo de operaciones por día', minval = 1, maxval = 10, group = gSig, display = display)
+
+gAlign = '🧲 FILTRO DE ALINEACIÓN · lo que estás probando'
+alignOn   = input.bool(false, 'Descartar los fades que van contra la dirección del día', group = gAlign, tooltip = 'Este es el interruptor del experimento. Corre el backtest con él apagado y luego encendido, y compara.')
+alignDead = input.float(0.15, '   Zona muerta (X veces el tamaño del rango)', step = 0.05, minval = 0, maxval = 1, group = gAlign, display = display)
+contOn    = input.bool(false, 'MODO CONTINUACIÓN · operar a favor del día en vez de descartar', group = gAlign, tooltip = 'Necesita el filtro de alineación encendido.')
+
+gRisk = '🎯 RIESGO'
+slMode     = input.string('Extremo de la manipulación', 'Cálculo del Stop Loss', options = ['Extremo de la manipulación', 'Extremo del rango 09:30-09:45', 'ATR', 'Puntos fijos'], group = gRisk, display = display)
+slBufTicks = input.int(2, 'Colchón del stop (ticks)', minval = 0, group = gRisk, display = display)
+atrLen     = input.int(14, 'ATR · periodo', minval = 1, inline = 'AT', group = gRisk, display = display)
+atrMult    = input.float(1.5, 'x', step = 0.1, minval = 0.1, inline = 'AT', group = gRisk, display = display)
+fixedSlPts = input.float(20, 'Stop fijo (puntos)', step = 0.25, minval = 0.25, group = gRisk, display = display)
+tp1R       = input.float(1.0, 'TP1 (R)', step = 0.25, minval = 0.25, inline = 'TP', group = gRisk, display = display)
+tp2R       = input.float(1.5, 'TP2 (R)', step = 0.25, minval = 0.25, inline = 'TP', group = gRisk, display = display)
+tp3R       = input.float(2.0, 'TP3 (R)', step = 0.25, minval = 0.25, inline = 'TP', group = gRisk, display = display)
+useMinStop = input.bool(false, 'Descartar si el stop es menor a (pts)', inline = 'MN', group = gRisk)
+minStopPts = input.float(5, '', step = 0.25, inline = 'MN', group = gRisk, display = display)
+stopFilterMode   = input.string('Múltiplo del rango', 'Descartar señales con stop demasiado grande', options = ['Múltiplo del rango', 'Puntos fijos', 'Sin filtro'], group = gRisk, display = display)
+maxStopRangeMult = input.float(2.5, '   Máximo = X veces el tamaño del rango', step = 0.25, minval = 0.25, group = gRisk, display = display)
+maxStopPts       = input.float(80, '   Máximo en puntos', step = 0.25, minval = 0.25, group = gRisk, display = display)
+beAfterTp1 = input.bool(true, 'Mover el stop a break-even tras TP1', group = gRisk)
+
+gQty = '📦 GESTIÓN DE LA POSICIÓN'
+qtyTot   = input.int(3, 'Contratos por operación', minval = 1, group = gQty, display = display, tooltip = 'Con salidas parciales activadas conviene que sea múltiplo de 3: uno para cada TP.')
+useScale = input.bool(true, 'Salidas parciales en TP1, TP2 y TP3', group = gQty, tooltip = 'Reproduce cómo operas: sales por tercios y tras TP1 el stop se va a break-even. Si lo apagas, la posición entera sale en un único TP.')
+oneTp    = input.string('TP2', '   Si no hay parciales, salir en', options = ['TP1', 'TP2', 'TP3'], group = gQty, display = display)
+
+gStat = '📊 PANEL DE RESULTADOS'
+statOn   = input.bool(true, 'Mostrar el panel', inline = 'ST', group = gStat)
+statPos  = input.string('Arriba derecha', '', options = ['Arriba derecha', 'Arriba izquierda', 'Centro derecha', 'Centro izquierda', 'Abajo derecha', 'Abajo izquierda'], inline = 'ST', group = gStat, display = display)
+statSize = input.string('Pequeño', '', options = ['Diminuto', 'Pequeño', 'Normal'], inline = 'ST', group = gStat, display = display)
+riskUsd  = input.float(250, 'Riesgo por operación ($)', step = 25, minval = 1, group = gStat, display = display, tooltip = 'Todo el panel se calcula normalizando cada operación a este riesgo. Perder una operación completa son estos dólares; ganar 1:1 con la posición entera, otros tantos. Así los números no dependen de cuántos contratos pongas.')
+ddLimit  = input.float(2000, 'Límite de drawdown de la cuenta ($)', step = 100, minval = 1, group = gStat, display = display, tooltip = 'El de tu cuenta de fondeo. El panel te dice qué porcentaje de ese límite se comió la peor racha del histórico. Si pasa del 100 %, la cuenta habría reventado.')
+statR1   = input.float(1.0, 'Niveles de R a medir', step = 0.25, minval = 0.25, inline = 'SR', group = gStat, display = display)
+statR2   = input.float(1.5, '', step = 0.25, minval = 0.25, inline = 'SR', group = gStat, display = display)
+statR3   = input.float(2.0, '', step = 0.25, minval = 0.25, inline = 'SR', group = gStat, display = display)
+statR4   = input.float(3.0, '', step = 0.25, minval = 0.25, inline = 'SR', group = gStat, display = display)
+
+gBias = '🧭 BIAS (opcional)'
+useBiasFilt  = input.bool(false, 'Filtrar según el bias de temporalidad alta', group = gBias)
+biasTfHigh   = input.timeframe('60', '   Temporalidad', group = gBias, display = display)
+biasMaLen    = input.int(21, '   EMA', minval = 2, group = gBias, display = display)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Cálculos base
+//---------------------------------------------------------------------------------------------------------------------{
+f_sizeOk(r, oh, ol) =>
+    bool ok = r > 0
+    if ok and useMinStop and r < minStopPts
+        ok := false
+    if ok and stopFilterMode == 'Puntos fijos' and r > maxStopPts
+        ok := false
+    if ok and stopFilterMode == 'Múltiplo del rango'
+        rng = oh - ol
+        if not na(rng) and rng > 0 and r > rng * maxStopRangeMult
+            ok := false
+    ok
+
+inOR    = not na(time(timeframe.period, nyRange, 'America/New_York'))
+orStart = inOR and not inOR[1]
+orEnd   = not inOR and inOR[1]
+inWin   = not na(time(timeframe.period, entryWinSes, 'America/New_York'))
+winEnd  = not inWin and inWin[1]
+
+var float orH     = na
+var float orL     = na
+var bool  orReady = false
+if orStart
+    orH := high
+    orL := low
+    orReady := false
+else if inOR
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+if orEnd
+    orReady := true
+
+// VWAP de la sesión de NY: el del cruce de entrada.
+nyAnchor    = not na(time(timeframe.period, nyRange, 'America/New_York'))
+nySessStart = nyAnchor and nyAnchor != nyAnchor[1]
+[nyVwap, nyVwUp, nyVwDn] = ta.vwap(ohlc4, nySessStart, 1)
+// VWAP del día (18:00): el que marca la dirección del día para el filtro de alineación.
+[dayVwap, dayVwUp, dayVwDn] = ta.vwap(ohlc4, timeframe.change('D'), 1)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Ruptura del rango y reingreso
+//---------------------------------------------------------------------------------------------------------------------{
+var int   brkDir    = 0
+var float sweepExt  = na
+var bool  reentered = false
+var int   brkBar    = na
+var int   sigToday  = 0
+if orStart
+    brkDir := 0
+    sweepExt := na
+    reentered := false
+    brkBar := na
+    sigToday := 0
+
+brokeUp = orReady and (brkMode == 'Cierre' ? close > orH : high > orH)
+brokeDn = orReady and (brkMode == 'Cierre' ? close < orL : low  < orL)
+
+if orReady and timeframe.isintraday
+    if brkDir == 0
+        if brokeUp
+            brkDir := 1
+            sweepExt := high
+            brkBar := bar_index
+            reentered := false
+        else if brokeDn
+            brkDir := -1
+            sweepExt := low
+            brkBar := bar_index
+            reentered := false
+    else if brkDir == 1
+        sweepExt := math.max(nz(sweepExt, high), high)
+        if not reentered and close < orH
+            reentered := true
+        if useBarLim and not reentered and bar_index - brkBar > barLim
+            brkDir := 0
+            sweepExt := na
+    else if brkDir == -1
+        sweepExt := math.min(nz(sweepExt, low), low)
+        if not reentered and close > orL
+            reentered := true
+        if useBarLim and not reentered and bar_index - brkBar > barLim
+            brkDir := 0
+            sweepExt := na
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Filtros
+//---------------------------------------------------------------------------------------------------------------------{
+[bcHi, beHi] = request.security(syminfo.tickerid, biasTfHigh, [close, ta.ema(close, biasMaLen)], lookahead = barmerge.lookahead_off)
+chartBias    = na(bcHi) or na(beHi) ? 0 : bcHi > beHi ? 1 : bcHi < beHi ? -1 : 0
+biasOkLong   = not useBiasFilt or chartBias >= 0
+biasOkShort  = not useBiasFilt or chartBias <= 0
+
+dayDir = na(dayVwap) or na(orH) or na(orL) or orH <= orL ? 0 : close > dayVwap + (orH - orL) * alignDead ? 1 : close < dayVwap - (orH - orL) * alignDead ? -1 : 0
+alignOkLong  = not alignOn or dayDir >= 0
+alignOkShort = not alignOn or dayDir <= 0
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Señales
+//---------------------------------------------------------------------------------------------------------------------{
+atrVal  = ta.atr(atrLen)
+buf     = slBufTicks * syminfo.mintick
+crossUp = ta.crossover(close, nyVwap)
+crossDn = ta.crossunder(close, nyVwap)
+
+baseOk = timeframe.isintraday and orReady and inWin and not na(nyVwap)
+setupLong  = baseOk and brkDir == -1 and (not needReentry or reentered) and crossUp
+setupShort = baseOk and brkDir ==  1 and (not needReentry or reentered) and crossDn
+
+slLongCand  = slMode == 'Extremo de la manipulación'    ? nz(sweepExt, low)  - buf :
+              slMode == 'Extremo del rango 09:30-09:45' ? orL - buf :
+              slMode == 'ATR'                            ? close - atrVal * atrMult : close - fixedSlPts
+slShortCand = slMode == 'Extremo de la manipulación'    ? nz(sweepExt, high) + buf :
+              slMode == 'Extremo del rango 09:30-09:45' ? orH + buf :
+              slMode == 'ATR'                            ? close + atrVal * atrMult : close + fixedSlPts
+
+// Tramos a cada lado del VWAP, para el stop de las entradas de continuación.
+above = not na(nyVwap) and close > nyVwap
+below = not na(nyVwap) and close < nyVwap
+var float legHi = na
+var float legLo = na
+if above and not above[1]
+    legHi := high
+else if above
+    legHi := math.max(nz(legHi, high), high)
+if below and not below[1]
+    legLo := low
+else if below
+    legLo := math.min(nz(legLo, low), low)
+
+slContShort = slMode == 'ATR' ? close + atrVal * atrMult : slMode == 'Puntos fijos' ? close + fixedSlPts : math.max(nz(legHi, high), high) + buf
+slContLong  = slMode == 'ATR' ? close - atrVal * atrMult : slMode == 'Puntos fijos' ? close - fixedSlPts : math.min(nz(legLo, low),  low)  - buf
+
+contBase = baseOk and alignOn and contOn and (not needReentry or reentered)
+setupContShort = contBase and dayDir == -1 and brkDir == -1 and crossDn
+setupContLong  = contBase and dayDir ==  1 and brkDir ==  1 and crossUp
+
+flat    = strategy.position_size == 0
+canFire = sigToday < maxSigs and flat
+
+longSig      = setupLong  and canFire and biasOkLong  and alignOkLong  and f_sizeOk(close - slLongCand,  orH, orL)
+shortSig     = setupShort and canFire and biasOkShort and alignOkShort and f_sizeOk(slShortCand - close, orH, orL)
+contLongSig  = setupContLong  and canFire and f_sizeOk(close - slContLong,  orH, orL)
+contShortSig = setupContShort and canFire and f_sizeOk(slContShort - close, orH, orL)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Ejecución
+//---------------------------------------------------------------------------------------------------------------------{
+var float entryPx = na
+var float slPx    = na
+var float tp1Px   = na
+var float tp2Px   = na
+var float tp3Px   = na
+var bool  tp1Hit  = false
+var int   trDir   = 0
+
+goLong  = longSig  or contLongSig
+goShort = shortSig or contShortSig
+
+if goLong or goShort
+    entryPx := close
+    slPx    := longSig ? slLongCand : shortSig ? slShortCand : contLongSig ? slContLong : slContShort
+    r       = math.abs(entryPx - slPx)
+    trDir   := goLong ? 1 : -1
+    tp1Px   := goLong ? entryPx + r * tp1R : entryPx - r * tp1R
+    tp2Px   := goLong ? entryPx + r * tp2R : entryPx - r * tp2R
+    tp3Px   := goLong ? entryPx + r * tp3R : entryPx - r * tp3R
+    tp1Hit  := false
+    sigToday += 1
+    // El setup se consume, igual que en el indicador.
+    brkDir    := 0
+    reentered := false
+    sweepExt  := na
+    strategy.entry(goLong ? 'L' : 'S', goLong ? strategy.long : strategy.short, qty = qtyTot, comment = (contLongSig or contShortSig) ? 'cont' : 'fade')
+
+if strategy.position_size != 0
+    if not tp1Hit and (trDir == 1 ? high >= tp1Px : low <= tp1Px)
+        tp1Hit := true
+    slNow = tp1Hit and beAfterTp1 ? entryPx : slPx
+    ent   = trDir == 1 ? 'L' : 'S'
+    if useScale and qtyTot >= 3
+        q  = math.floor(qtyTot / 3)
+        strategy.exit('t1', ent, qty = q, limit = tp1Px, stop = slNow)
+        strategy.exit('t2', ent, qty = q, limit = tp2Px, stop = slNow)
+        strategy.exit('t3', ent,          limit = tp3Px, stop = slNow)
+    else
+        tpOne = oneTp == 'TP1' ? tp1Px : oneTp == 'TP3' ? tp3Px : tp2Px
+        strategy.exit('t', ent, limit = tpOne, stop = slNow)
+
+if closeAtEnd and winEnd and strategy.position_size != 0
+    strategy.close_all('fin de ventana')
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Registro propio de operaciones
+//---------------------------------------------------------------------------------------------------------------------{
+// Se lleva aparte del P&L de TradingView a propósito: aquí cada operación se normaliza al riesgo en dólares
+// que hayas puesto, así los números no dependen del número de contratos y se pueden comparar con el límite
+// de drawdown de la cuenta. El modelo reproduce tu gestión: tercios en TP1, TP2 y TP3, y break-even tras TP1.
+var bool  inTr    = false
+var int   tDir    = 0
+var float tEnt    = na
+var float tSl0    = na
+var float tR      = na
+var float tMax    = na
+var float booked  = 0.0
+var int   lvl     = 0
+var int   nTr     = 0
+var int   n1      = 0
+var int   n2      = 0
+var int   n3      = 0
+var int   n4      = 0
+var float eq      = 0.0
+var float eqPeak  = 0.0
+var float maxDD   = 0.0
+var int   streak  = 0
+var int   worst   = 0
+var float grossW  = 0.0
+var float grossL  = 0.0
+
+if goLong or goShort
+    inTr   := true
+    tDir   := goLong ? 1 : -1
+    tEnt   := close
+    tSl0   := slPx
+    tR     := math.abs(close - slPx)
+    tMax   := 0.0
+    booked := 0.0
+    lvl    := 0
+
+// El seguimiento arranca en la vela SIGUIENTE: la entrada se llena al cierre, el resto de esa vela ya pasó.
+if inTr and not (goLong or goShort) and not na(tR) and tR > 0
+    fav = (tDir == 1 ? high - tEnt : tEnt - low) / tR
+    tMax := math.max(tMax, fav)
+    effSl = lvl >= 1 and beAfterTp1 ? tEnt : tSl0
+    bool done = false
+    float res = na
+    if tDir == 1 ? low <= effSl : high >= effSl
+        res  := lvl == 0 ? -1.0 : booked + (3 - lvl) / 3.0 * (beAfterTp1 ? 0.0 : -1.0)
+        done := true
+    else
+        if lvl < 1 and fav >= tp1R
+            lvl    := 1
+            booked += tp1R / 3
+        if lvl < 2 and fav >= tp2R
+            lvl    := 2
+            booked += tp2R / 3
+        if lvl < 3 and fav >= tp3R
+            lvl    := 3
+            booked += tp3R / 3
+            res    := booked
+            done   := true
+    if not done and closeAtEnd and winEnd
+        res  := booked + (3 - lvl) / 3.0 * ((tDir == 1 ? close - tEnt : tEnt - close) / tR)
+        done := true
+    if done
+        inTr := false
+        nTr  += 1
+        n1   += tMax >= statR1 ? 1 : 0
+        n2   += tMax >= statR2 ? 1 : 0
+        n3   += tMax >= statR3 ? 1 : 0
+        n4   += tMax >= statR4 ? 1 : 0
+        eq     += res * riskUsd
+        eqPeak := math.max(eqPeak, eq)
+        maxDD  := math.max(maxDD, eqPeak - eq)
+        if res < 0
+            streak += 1
+            worst  := math.max(worst, streak)
+            grossL += -res * riskUsd
+        else
+            streak := 0
+            grossW += res * riskUsd
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Panel de resultados
+//---------------------------------------------------------------------------------------------------------------------{
+f_spos(string p) =>
+    switch p
+        'Arriba derecha'   => position.top_right
+        'Arriba izquierda' => position.top_left
+        'Centro derecha'   => position.middle_right
+        'Centro izquierda' => position.middle_left
+        'Abajo derecha'    => position.bottom_right
+        => position.bottom_left
+
+f_ssize(string s) =>
+    switch s
+        'Diminuto' => size.tiny
+        'Pequeño'  => size.small
+        => size.normal
+
+f_pct(int a, int b) => b == 0 ? '—' : str.tostring(a * 100.0 / b, '#.#') + ' %'
+f_usd(float v)      => (v >= 0 ? '+' : '−') + str.tostring(math.abs(v), '#,###') + ' $'
+
+var table tSt = table.new(f_spos(statPos), 2, 11, border_width = 1, frame_width = 1, frame_color = color.new(#607d8b, 40), border_color = color.new(#607d8b, 60))
+
+f_stRow(int r, string k, string v, color c) =>
+    table.cell(tSt, 0, r, k, text_size = f_ssize(statSize), text_color = #212121, bgcolor = color.new(#ffffff, 12))
+    table.cell(tSt, 1, r, v, text_size = f_ssize(statSize), text_color = color.white, bgcolor = color.new(c, 15))
+
+if statOn and barstate.islast
+    ddPct = ddLimit > 0 ? maxDD / ddLimit * 100 : 0
+    ddCol = ddPct >= 100 ? #b71c1c : ddPct >= 70 ? #ef6c00 : #2e7d32
+    pf    = grossL > 0 ? grossW / grossL : na
+    table.cell(tSt, 0, 0, 'CH033 BACKTEST', text_size = f_ssize(statSize), text_color = color.white, bgcolor = #37474f)
+    table.cell(tSt, 1, 0, 'riesgo ' + str.tostring(riskUsd, '#') + ' $', text_size = f_ssize(statSize), text_color = color.white, bgcolor = #37474f)
+    f_stRow(1,  'Operaciones',   str.tostring(nTr),      #607d8b)
+    f_stRow(2,  'Llegó a 1:' + str.tostring(statR1, '#.##'), f_pct(n1, nTr), #455a64)
+    f_stRow(3,  'Llegó a 1:' + str.tostring(statR2, '#.##'), f_pct(n2, nTr), #455a64)
+    f_stRow(4,  'Llegó a 1:' + str.tostring(statR3, '#.##'), f_pct(n3, nTr), #455a64)
+    f_stRow(5,  'Llegó a 1:' + str.tostring(statR4, '#.##'), f_pct(n4, nTr), #455a64)
+    f_stRow(6,  'Resultado',     f_usd(eq),              eq >= 0 ? #2e7d32 : #c62828)
+    f_stRow(7,  'Factor benef.', na(pf) ? '—' : str.tostring(pf, '#.##'), na(pf) ? #607d8b : pf >= 1.5 ? #2e7d32 : pf >= 1 ? #ef6c00 : #c62828)
+    f_stRow(8,  'Peor racha',    str.tostring(worst) + ' seguidas', worst >= 6 ? #c62828 : #607d8b)
+    f_stRow(9,  'Drawdown máx.', '−' + str.tostring(maxDD, '#,###') + ' $', ddCol)
+    f_stRow(10, 'Del límite de ' + str.tostring(ddLimit, '#,###') + ' $', str.tostring(ddPct, '#.#') + ' %', ddCol)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Visual mínimo, solo para auditar los rellenos
+//---------------------------------------------------------------------------------------------------------------------{
+plot(inWin and orReady ? orH : na, 'Máximo del rango', #1565c0, 1, plot.style_linebr)
+plot(inWin and orReady ? orL : na, 'Mínimo del rango', #1565c0, 1, plot.style_linebr)
+plot(nyVwap,  'VWAP de NY',  #0031ff, 2)
+plot(dayVwap, 'VWAP del día', color.new(#000000, 30), 1)
+plotshape(longSig,      '▲ Fade largo',          shape.triangleup,   location.belowbar, #4a148c, size = size.tiny)
+plotshape(shortSig,     '▼ Fade corto',          shape.triangledown, location.abovebar, #880e4f, size = size.tiny)
+plotshape(contLongSig,  '▲ Continuación larga',  shape.triangleup,   location.belowbar, #00838f, size = size.tiny)
+plotshape(contShortSig, '▼ Continuación corta',  shape.triangledown, location.abovebar, #00838f, size = size.tiny)
+
+//---------------------------------------------------------------------------------------------------------------------}
