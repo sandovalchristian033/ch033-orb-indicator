@@ -7,6 +7,14 @@ session VWAP.
 Three files: the full indicator, a stripped backtest strategy, and a VWAP-focused
 variant.
 
+![CH033 ORB+ on MES, 2-minute chart](docs/orb-setup-mes.png)
+
+*MES, 2-minute, 19 Aug 2026. The complete sequence in one frame: the 09:30-09:45
+opening range forms (red box), price sweeps the low, returns inside, then closes
+back above session VWAP - the entry, marked by the triangle. Price expands to the
+upside for the rest of the morning. The panel in the lower left reports the day
+across three instruments at once; MES shows `LONG` reaching the third target.*
+
 ---
 
 ## The setup
