@@ -1231,7 +1231,7 @@ if barstate.islast
     // ---- Panel TENDENCIA ----
     if showTrend
         sz = f_size(trendSize)
-        table.cell(tTrend, 0, 0, 'TEND', text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tTrend, 0, 0, 'TREND', text_size = sz, text_color = color.white, bgcolor = panelHdr)
         table.cell(tTrend, 1, 0, f_tfLabel(biasTfHigh), text_size = sz, text_color = color.white, bgcolor = panelHdr)
         table.cell(tTrend, 2, 0, f_tfLabel(biasTfMid),  text_size = sz, text_color = color.white, bgcolor = panelHdr)
         table.cell(tTrend, 3, 0, 'VWAP', text_size = sz, text_color = color.white, bgcolor = panelHdr)
@@ -1246,7 +1246,7 @@ if barstate.islast
         table.cell(tSetup, 1, 0, 'ORB',    text_size = sz, text_color = color.white, bgcolor = panelHdr)
         table.cell(tSetup, 2, 0, 'VWAP',   text_size = sz, text_color = color.white, bgcolor = panelHdr)
         table.cell(tSetup, 3, 0, 'Result', text_size = sz, text_color = color.white, bgcolor = panelHdr)
-        table.cell(tSetup, 4, 0, 'Rango',  text_size = sz, text_color = color.white, bgcolor = panelHdr)
+        table.cell(tSetup, 4, 0, 'Range',  text_size = sz, text_color = color.white, bgcolor = panelHdr)
         f_rowSetup(tSetup, 1, nm1, rdy1, bd1, fi1, oh1, ol1, rs1, sz)
         f_rowSetup(tSetup, 2, nm2, rdy2, bd2, fi2, oh2, ol2, rs2, sz)
         f_rowSetup(tSetup, 3, nm3, rdy3, bd3, fi3, oh3, ol3, rs3, sz)
